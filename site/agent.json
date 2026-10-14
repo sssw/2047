@@ -83,7 +83,10 @@
     "resultPath": "getState().assessment.result",
     "expiredActions": "move, undo, and redo return changed false with reason timeout",
     "shareFragment": "#round=",
-    "newGameConfirmation": "A nonzero score returns needsConfirmation without changing the game; confirm:true explicitly replaces it"
+    "newGameConfirmation": "A nonzero score returns needsConfirmation without changing the game; confirm:true explicitly replaces it",
+    "start": "First valid move; ready rounds have null startedAt and deadline",
+    "elapsedPath": "getState().assessment.elapsedMs",
+    "untimed": "Counts up after the first valid move; saved-game links preserve startedAt"
   },
   "timerEvent": "game2047:timer",
   "milestoneEvent": "game2047:milestone"

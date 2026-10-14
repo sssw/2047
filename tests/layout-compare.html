@@ -3,23 +3,24 @@
 <h1>2047 layout comparison</h1><button id="run">Compare layouts</button><pre id="result">Ready.</pre><iframe id="old" title="Previous layout"></iframe><iframe id="current" title="Current layout"></iframe>
 <script type="module">
 import { newGame } from '../site/engine.js';
-import { createRound, expireRound, encodeRound } from '../site/assessment.js';
+import { createRound, beginRound, expireRound, encodeRound } from '../site/assessment.js';
 const old=document.querySelector('#old'),current=document.querySelector('#current'),out=document.querySelector('#result');
 const load=(frame,url)=>new Promise(resolve=>{frame.onload=resolve;frame.src=url});
 document.querySelector('#run').onclick=async()=>{
  document.querySelector('#run').disabled=true;const cases=[];let error=null;
  try{
-  const game=newGame({seed:'layout'}),record=encodeRound(game,expireRound(createRound(game,120,1),120001));
+  const game={...newGame({seed:'layout'}),score:2496},record=encodeRound(game,expireRound(beginRound(createRound(game,120),1),120001));
   for(const [width,height] of [[320,460],[375,540],[390,640],[430,740],[568,240],[667,325],[844,330],[896,414],[600,800],[800,600],[820,1080],[1024,710],[1280,800]]){
    for(const f of [old,current]){f.style.width=width+'px';f.style.height=height+'px'}
-   await Promise.all([load(old,'../baseline/?seed=layout&save=0&sound=0&view='+width+'x'+height),load(current,'../site/?save=0&sound=0&view='+width+'x'+height+'#round='+record)]);
+   await Promise.all([load(old,'../baseline/?seed=layout&save=0&sound=0&score=2496&board='+game.grid.join(',')+'&view='+width+'x'+height),load(current,'../site/?save=0&sound=0&view='+width+'x'+height+'#round='+record)]);
    if(current.contentDocument.querySelector('#round-notice').hidden)throw new Error('Timed result did not appear');
    const baseline=old.contentDocument.querySelector('#board').getBoundingClientRect(),doc=current.contentDocument;
    const board=doc.querySelector('#board').getBoundingClientRect(),notice=doc.querySelector('#round-notice').getBoundingClientRect(),shell=doc.querySelector('.app-shell');
    const timer=doc.querySelector('#timer-button').getBoundingClientRect(),actions=doc.querySelector('.left-actions').getBoundingClientRect(),tools=doc.querySelector('.round-tools').getBoundingClientRect();
    const headerClear=width>height&&width>=480||tools.right<=actions.left+.5;
-   const row={actualViewport:[current.contentWindow.innerWidth,current.contentWindow.innerHeight],headerClear,timerTouchTarget:timer.width>=43.5&&timer.height>=43.5,viewport:[width,height],baseline:[baseline.width,baseline.height],board:[board.x,board.y,board.width,board.height],notice:[notice.x,notice.y,notice.width,notice.height],noBoardLoss:board.width>=baseline.width-.5&&board.height>=baseline.height-.5,noOverlap:notice.bottom<=board.top||notice.right<=board.left||notice.left>=board.right||notice.top>=board.bottom,inBounds:notice.left>=0&&notice.top>=0&&notice.right<=width+.5&&notice.bottom<=height+.5,noOverflow:shell.scrollWidth<=shell.clientWidth&&shell.scrollHeight<=shell.clientHeight};
-   cases.push(row);out.textContent=JSON.stringify({complete:false,cases},null,2);if(!row.headerClear||!row.timerTouchTarget||!row.noBoardLoss||!row.noOverlap||!row.inBounds||!row.noOverflow)throw new Error('Layout regression at '+width+'×'+height);
+   const scoresFit=['#score','#best','#moves'].every(selector=>{const e=doc.querySelector(selector);return e.scrollWidth<=e.clientWidth+1});
+   const row={scoresFit,actualViewport:[current.contentWindow.innerWidth,current.contentWindow.innerHeight],headerClear,timerTouchTarget:timer.width>=43.5&&timer.height>=43.5,viewport:[width,height],baseline:[baseline.width,baseline.height],board:[board.x,board.y,board.width,board.height],notice:[notice.x,notice.y,notice.width,notice.height],noBoardLoss:board.width>=baseline.width-.5&&board.height>=baseline.height-.5,noOverlap:notice.bottom<=board.top||notice.right<=board.left||notice.left>=board.right||notice.top>=board.bottom,inBounds:notice.left>=0&&notice.top>=0&&notice.right<=width+.5&&notice.bottom<=height+.5,noOverflow:shell.scrollWidth<=shell.clientWidth&&shell.scrollHeight<=shell.clientHeight};
+   cases.push(row);out.textContent=JSON.stringify({complete:false,cases},null,2);if(!row.scoresFit||!row.headerClear||!row.timerTouchTarget||!row.noBoardLoss||!row.noOverlap||!row.inBounds||!row.noOverflow)throw new Error('Layout regression at '+width+'×'+height);
   }
  }catch(e){error=e.message}
  out.textContent=JSON.stringify({complete:true,error,cases},null,2);document.querySelector('#run').disabled=false;

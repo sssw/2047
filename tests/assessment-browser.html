@@ -23,9 +23,41 @@ document.querySelector('#run').onclick=async()=>{
   const boardAfter=frame.contentDocument.querySelector('#board').getBoundingClientRect();
   check(boardBefore.width===boardAfter.width&&boardBefore.height===boardAfter.height,'Enabling a timer preserves board size');
   check(frame.contentDocument.querySelector('#best').previousElementSibling.textContent==='BEST'&&frame.contentDocument.querySelector('#moves').previousElementSibling.textContent==='MOVES','All original score statistics remain');
-  const deadline=game.getState().assessment.deadline;
-  game.move(game.getState().legalMoves[0]);game.undo();game.redo();
+  check(game.getState().assessment.status==='ready'&&game.getState().assessment.deadline===null,'A fresh timed round is ready, not running');
+  game.move(game.getState().legalMoves[0]);const deadline=game.getState().assessment.deadline;game.undo();game.redo();
   check(game.getState().assessment.deadline===deadline,'Undo and redo never reset the timer');
+
+  await unload();reset();
+  const readyURL='?seed=ready&size=2&board=1,0,0,0&timer=1&sound=0';
+  game=await load(readyURL);
+  check(!game.move('left').changed&&game.getState().assessment.startedAt===null,'A blocked move does not start the countdown');
+  await sleep(1100);
+  check(game.getState().assessment.status==='ready'&&game.getState().assessment.remainingMs===1000,'Waiting longer than the time limit does not consume a ready round');
+  await unload();game=await load(readyURL);
+  check(game.getState().assessment.status==='ready'&&game.getState().assessment.startedAt===null,'Ready state survives reload');
+  const readyShare=new URL(game.shareURL());
+  await unload();game=await load('?save=0&sound=0'+readyShare.hash);
+  check(game.getState().assessment.status==='ready'&&game.getState().assessment.remainingMs===1000,'A shared ready board waits for its first valid move');
+  game.move('right');
+  check(game.getState().assessment.status==='running'&&game.getState().assessment.deadline!==null,'The first valid move starts the countdown');
+
+  await unload();reset();
+  const elapsedURL='?seed=elapsed&size=2&board=1,0,0,0&sound=0';
+  game=await load(elapsedURL);game.move('left');
+  check(game.getState().assessment.startedAt===null&&game.getState().assessment.elapsedMs===0,'An invalid untimed move leaves elapsed time at zero');
+  game.move('right');const elapsedStart=game.getState().assessment.startedAt;
+  await sleep(1100);
+  const elapsedBefore=game.getState().assessment.elapsedMs;
+  check(elapsedStart!==null&&elapsedBefore>=1000&&frame.contentDocument.querySelector('#timer-label').textContent==='ELAPSED'&&frame.contentDocument.querySelector('#timer-display').textContent!=='0:00','Untimed play displays elapsed time after the first move');
+  game.undo();game.redo();
+  check(game.getState().assessment.startedAt===elapsedStart,'Undo and redo do not rewind elapsed time');
+  await unload();game=await load(elapsedURL);
+  check(game.getState().assessment.startedAt===elapsedStart&&game.getState().assessment.elapsedMs>=elapsedBefore,'Untimed elapsed time survives reload');
+  const elapsedShare=new URL(game.shareURL());const elapsedPosition=position(game);
+  await unload();game=await load('?save=0&timer=1&sound=0'+elapsedShare.hash);
+  check(game.getState().assessment.startedAt===elapsedStart&&game.getState().assessment.elapsedMs>=elapsedBefore&&!game.getState().assessment.enabled&&equal(position(game),elapsedPosition),'A shared untimed board retains elapsed time and cannot become timed through URL options');
+  game.newGame({timeLimit:0,confirm:true});
+  check(game.getState().assessment.startedAt===null&&game.getState().assessment.elapsedMs===0,'Starting a new round clears elapsed time');
 
   await unload();reset();
   const url='?seed=timeout&size=2&board=1,2,0,0&timer=2&sound=0';

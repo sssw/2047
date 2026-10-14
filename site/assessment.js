@@ -15,19 +15,29 @@ export function createClock(wall = Date.now, monotonic = () => performance.now()
   return () => (last = Math.max(last, wall(), start + monotonic() - offset));
 }
 
-export function createRound(game, seconds = 0, now = Date.now()) {
+export function createRound(game, seconds = 0) {
   const durationSeconds = duration(seconds), maxTile = Math.max(...game.grid);
-  const startedAt = durationSeconds ? Math.floor(now) : null;
-  return { version: 1, durationSeconds, startedAt, deadline: startedAt === null ? null : startedAt + durationSeconds * 1000,
+  return { version: 1, durationSeconds, startedAt: null, deadline: null,
     expired: false, maxTile, celebrated: maxTile >= MILESTONE, startScore: game.score, movesMade: 0, undos: 0, redos: 0 };
 }
 
+export function beginRound(round, now) {
+  if (round.startedAt !== null || round.expired) return round;
+  const startedAt = Math.floor(now);
+  return { ...round, startedAt, deadline: round.durationSeconds ? startedAt + round.durationSeconds * 1000 : null };
+}
+
+export function elapsed(round, now) {
+  if (round.startedAt === null) return 0;
+  return Math.max(0, (round.deadline === null ? now : Math.min(now, round.deadline)) - round.startedAt);
+}
+
 export function remaining(round, now) {
-  return round.durationSeconds ? Math.max(0, Math.min(round.durationSeconds * 1000, round.deadline - now)) : null;
+  return round.durationSeconds ? Math.max(0, round.durationSeconds * 1000 - elapsed(round, now)) : null;
 }
 
 export function expireRound(round, now) {
-  return !round.expired && round.durationSeconds && now >= round.deadline ? { ...round, expired: true } : round;
+  return !round.expired && round.deadline !== null && now >= round.deadline ? { ...round, expired: true } : round;
 }
 
 export function recordRound(round, game, action) {
@@ -40,8 +50,9 @@ export function recordRound(round, game, action) {
 
 export function assessment(round, game, now) {
   return {
-    enabled: round.durationSeconds > 0, status: round.expired ? 'finished' : round.durationSeconds ? 'running' : 'off',
+    enabled: round.durationSeconds > 0, status: round.expired ? 'finished' : round.durationSeconds ? round.startedAt === null ? 'ready' : 'running' : 'off',
     durationSeconds: round.durationSeconds, remainingMs: round.expired ? 0 : remaining(round, now) === null ? null : Math.ceil(remaining(round, now)),
+    elapsedMs: round.expired ? round.durationSeconds * 1000 : Math.floor(elapsed(round, now)),
     startedAt: round.startedAt, deadline: round.deadline,
     result: round.expired ? {
       reason: 'timeout', maxTile: round.maxTile, score: game.score, scoreGain: game.score - round.startScore,
@@ -57,13 +68,21 @@ export function formatTime(milliseconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
+export function formatElapsed(milliseconds) {
+  const total = Math.floor(Math.max(0, milliseconds) / 1000), seconds = String(total % 60).padStart(2, '0');
+  return total < 3600 ? `${Math.floor(total / 60)}:${seconds}`
+    : `${Math.floor(total / 3600)}:${String(Math.floor(total / 60) % 60).padStart(2, '0')}:${seconds}`;
+}
+
 export function validateRound(value, game) {
   if (value === undefined || value === null) return createRound(game);
   if (value.version !== 1) throw new Error('Unsupported timed round.');
   const seconds = duration(value.durationSeconds);
   const validInteger = (number, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(number) && number >= 0 && number <= max;
-  if (seconds ? !validInteger(value.startedAt) || !validInteger(value.deadline) || value.deadline !== value.startedAt + seconds * 1000
-    : value.startedAt !== null || value.deadline !== null || value.expired !== false) throw new Error('Invalid countdown.');
+  const ready = value.startedAt === null;
+  if ((!ready && !validInteger(value.startedAt))
+    || (ready || !seconds ? value.deadline !== null || value.expired !== false
+      : !validInteger(value.deadline) || value.deadline !== value.startedAt + seconds * 1000)) throw new Error('Invalid round clock.');
   if (typeof value.expired !== 'boolean' || typeof value.celebrated !== 'boolean'
     || !validInteger(value.maxTile, MAX_TILE) || value.maxTile < Math.max(...game.grid)
     || value.celebrated !== (value.maxTile >= MILESTONE)

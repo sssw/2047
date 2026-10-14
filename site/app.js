@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 import { DIRECTIONS, MODES, configuration, newGame, move, legalMoves, validateState, encodeState, launchFromURL, legacySessionKey, hashSeed } from './engine.js?v=20261014-random2';
 import { bitGlyph } from './glyph.js';
-import { DEFAULT_DURATION, MILESTONE, duration, createClock, createRound, recordRound, expireRound, remaining, assessment, formatTime, validateRound, encodeRound, decodeRound } from './assessment.js?v=20261014-timer1';
-import { celebrate, stopCelebration } from './celebration.js?v=20261014-timer1';
+import { DEFAULT_DURATION, MILESTONE, duration, createClock, createRound, beginRound, recordRound, expireRound, elapsed, remaining, assessment, formatTime, formatElapsed, validateRound, encodeRound, decodeRound } from './assessment.js?v=20261014-timer2';
+import { celebrate, stopCelebration } from './celebration.js?v=20261014-timer2';
 
 const elements = new Map();
 const $ = selector => {
@@ -17,7 +17,7 @@ let storageOK = true, past = [], future = [], state, sessionKey = 'default', ses
 let statusMessage = 'Make your first move.';
 const gameParameters = ['seed', 'mode', 'rows', 'cols', 'size', 'moves', 'board', 'score', 'timer'];
 let previousSessionKey = null;
-let round = null, countdownTask = null;
+let round = null, clockTask = null;
 let resultDismissed = false, pendingGame = null;
 const clockNow = createClock();
 
@@ -56,7 +56,7 @@ try {
     if (url.searchParams.has('timer') && !/^\d{1,4}$/.test(url.searchParams.get('timer'))) throw new Error('Timer must be a whole number of seconds.');
     const seconds = duration(Number(url.searchParams.get('timer') ?? 0));
     state = launchFromURL(url) ?? (url.searchParams.has('timer') ? newGame() : null);
-    if (state) round = createRound(state, seconds, clockNow());
+    if (state) round = createRound(state, seconds);
   }
   if (state) {
     const identity = url.hash.startsWith('#round=') ? encodeRound(state, round) : url.hash.startsWith('#state=') ? encodeState(state)
@@ -125,7 +125,7 @@ function persist() {
 }
 
 let legalState = null, cachedMoves = [];
-function snapshotState(now = round.durationSeconds ? clockNow() : 0) {
+function snapshotState(now = round.startedAt === null ? 0 : clockNow()) {
   if (legalState !== state) { cachedMoves = legalMoves(state); legalState = state; }
   const available = cachedMoves;
   return structuredClone({ ...state, highestTile: Math.max(...state.grid), peakTile: round.maxTile, milestoneReached: round.celebrated,
@@ -137,7 +137,7 @@ function snapshotState(now = round.durationSeconds ? clockNow() : 0) {
 }
 
 function refreshDeadline(now) {
-  if (!round.durationSeconds || round.expired) return false;
+  if (round.deadline === null || round.expired) return false;
   const next = expireRound(round, now ?? clockNow());
   if (next === round) return false;
   round = next;
@@ -146,33 +146,41 @@ function refreshDeadline(now) {
 }
 
 function getState() {
-  const now = round.durationSeconds ? clockNow() : 0;
+  const now = round.startedAt === null ? 0 : clockNow();
   if (refreshDeadline(now)) render();
   return snapshotState(now);
 }
 
 function paintTimer(snapshot) {
-  const timed = snapshot.assessment, button = $('#timer-button');
-  $('#timer-display').textContent = timed.enabled ? formatTime(timed.remainingMs) : 'Off';
-  $('#timer-label').textContent = timed.status === 'finished' ? 'TIME UP' : 'TIMER';
-  button.dataset.status = timed.status;
+  const timed = snapshot.assessment, button = $('#timer-button'), display = $('#timer-display');
+  const countingUp = !timed.enabled && timed.startedAt !== null;
+  display.textContent = timed.enabled ? formatTime(timed.remainingMs) : countingUp ? formatElapsed(timed.elapsedMs) : 'Off';
+  const digits = String(display.textContent.length);
+  if (display.style.getPropertyValue('--digits') !== digits) display.style.setProperty('--digits', digits);
+  $('#timer-label').textContent = countingUp ? 'ELAPSED' : timed.status === 'finished' ? 'TIME UP' : timed.status === 'ready' ? 'READY' : 'TIMER';
+  button.dataset.status = countingUp ? 'elapsed' : timed.status;
   button.dataset.urgent = timed.status === 'running' && timed.remainingMs <= 10000;
-  button.setAttribute('aria-label', timed.status === 'finished' ? 'Time is up. View result or start a timed round.' : timed.enabled ? `Countdown ${formatTime(timed.remainingMs)} remaining. Timer settings.` : 'Countdown off. Set a time limit.');
-  button.title = timed.enabled ? 'Time keeps running while settings are open.' : 'Optional timed round · default 2 minutes';
+  button.setAttribute('aria-label', countingUp ? `Elapsed ${display.textContent}. Timer settings.`
+    : timed.status === 'finished' ? 'Time is up. View result or start a timed round.'
+    : timed.status === 'ready' ? `Ready for ${display.textContent}. Countdown starts after your first valid move. Timer settings.`
+    : timed.enabled ? `Countdown ${display.textContent} remaining. Timer settings.` : 'Countdown off. Elapsed time starts after your first valid move. Timer settings.');
+  button.title = timed.startedAt !== null ? 'Time keeps running in menus and other tabs.'
+    : timed.enabled ? 'Ready · countdown starts after your first valid move' : 'Elapsed time starts after your first valid move · tap for a time limit';
 }
 
-function scheduleCountdown() {
-  clearTimeout(countdownTask); countdownTask = null;
-  if (!round.durationSeconds || round.expired || document.hidden) return;
-  const ms = remaining(round, clockNow());
-  countdownTask = setTimeout(() => {
+function scheduleClock() {
+  clearTimeout(clockTask); clockTask = null;
+  if (round.startedAt === null || round.expired || document.hidden) return;
+  const now = clockNow(), ms = remaining(round, now);
+  const delay = ms === null ? 1000 - elapsed(round, now) % 1000 : Math.min(ms, ms % 1000 || 1000);
+  clockTask = setTimeout(() => {
     if (refreshDeadline()) { render(); return; }
     const snapshot = snapshotState();
     paintTimer(snapshot);
     $('#game-state').textContent = JSON.stringify(snapshot);
     window.dispatchEvent(new CustomEvent('game2047:timer', { detail: snapshot.assessment }));
-    scheduleCountdown();
-  }, Math.max(1, Math.min(ms, ms % 1000 || 1000)));
+    scheduleClock();
+  }, Math.max(1, delay));
 }
 
 function roundLocked() {
@@ -274,8 +282,10 @@ function render(effect = {}) {
   $('#score').textContent = numberFormat.format(state.score);
   $('#best').textContent = numberFormat.format(snapshot.bestScore);
   $('#moves').textContent = numberFormat.format(state.moves);
-  for (const selector of ['#score', '#best']) {
-    const element = $(selector); element.title = element.textContent;
+  for (const selector of ['#score', '#best', '#moves']) {
+    const element = $(selector), digits = String(element.textContent.length);
+    element.title = element.textContent;
+    if (element.style.getPropertyValue('--digits') !== digits) element.style.setProperty('--digits', digits);
   }
   paintTimer(snapshot);
   $('#mode-pill').textContent = state.mode.toUpperCase();
@@ -353,7 +363,7 @@ function render(effect = {}) {
   paintResult(snapshot);
   $('#game-state').textContent = JSON.stringify(snapshot);
   window.dispatchEvent(new CustomEvent('game2047:change', { detail: snapshot }));
-  scheduleCountdown();
+  scheduleClock();
   return snapshot;
 }
 
@@ -404,6 +414,7 @@ function performMove(direction) {
   if (result.changed) {
     past.push(previous); if (past.length > 100) past.shift(); future = [];
     state = result.state;
+    round = beginRound(round, clockNow());
     const recorded = recordRound(round, state, 'move'); round = recorded.round; milestone = recorded.milestone;
     statusMessage = milestone ? `${Math.max(...state.grid)} reached. Keep going!` : result.gain ? `+${result.gain} · Keep the bits moving.` : 'A little more room.';
     playSound(result.gain, milestone);
@@ -453,13 +464,13 @@ function commitNewGame(chosen) {
   const next = newGame(chosen), seconds = chosen.timeLimit;
   stopCelebration($('#celebration'));
   state = next; past = []; future = []; sessionKey = 'default';
-  round = createRound(state, seconds, clockNow());
+  round = createRound(state, seconds);
   resultDismissed = false; pendingGame = null;
   const clean = new URL(location.href);
   for (const key of gameParameters) clean.searchParams.delete(key);
   clean.hash = '';
   history.replaceState(null, '', clean);
-  statusMessage = seconds ? 'Clock running. Make every move count.' : 'A fresh board. Make your first move.';
+  statusMessage = seconds ? 'Ready. Your first move starts the countdown.' : 'A fresh board. Make your first move.';
   return render();
 }
 
@@ -490,16 +501,16 @@ function shareURL(challenge = false) {
     link.searchParams.set('rows', state.rows);
     link.searchParams.set('cols', state.columns);
     if (round.durationSeconds) link.searchParams.set('timer', round.durationSeconds);
-  } else link.hash = round.durationSeconds ? 'round=' + encodeRound(state, round) : 'state=' + encodeState(state);
+  } else link.hash = 'round=' + encodeRound(state, round);
   return link.href;
 }
 function openShare(challenge = false) {
   $('#share-url').value = shareURL(challenge);
   $('#share-description').textContent = challenge ? 'Same seed and settings. A fresh board for a friend.'
     : round.expired ? 'This link includes your finished round, board, and result.'
-    : round.durationSeconds ? 'This link keeps your board and the original countdown deadline.'
-    : state.randomness === 'seeded' ? 'This link keeps your board, score, and repeatable continuation.'
-    : 'This link keeps your board and score. Future tiles are freshly randomized.';
+    : round.durationSeconds ? round.startedAt === null ? 'This link keeps your ready board. The first move starts the countdown.' : 'This link keeps your board and the original countdown deadline.'
+    : state.randomness === 'seeded' ? 'This link keeps your board, score, elapsed time, and repeatable continuation.'
+    : 'This link keeps your board, score, and elapsed time. Future tiles are freshly randomized.';
   $('#share-feedback').textContent = '';
   $('#challenge-button').hidden = challenge || state.randomness !== 'seeded';
   showDialog('#share-dialog');
@@ -696,11 +707,11 @@ $('#board').addEventListener('pointerup', event => {
 $('#board').addEventListener('pointercancel', () => { pointer = null; });
 $('#board').addEventListener('lostpointercapture', () => { pointer = null; });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { clearTimeout(countdownTask); flushSave(); stopCelebration($('#celebration')); }
-  else { if (refreshDeadline()) render(); else { paintTimer(snapshotState()); scheduleCountdown(); } }
+  if (document.hidden) { clearTimeout(clockTask); flushSave(); stopCelebration($('#celebration')); }
+  else { if (refreshDeadline()) render(); else { paintTimer(snapshotState()); scheduleClock(); } }
 });
-window.addEventListener('pageshow', () => { if (refreshDeadline()) render(); else scheduleCountdown(); });
-window.addEventListener('pagehide', () => { refreshDeadline(); persist(); flushSave(); clearTimeout(countdownTask); stopCelebration($('#celebration')); });
+window.addEventListener('pageshow', () => { if (refreshDeadline()) render(); else scheduleClock(); });
+window.addEventListener('pagehide', () => { refreshDeadline(); persist(); flushSave(); clearTimeout(clockTask); stopCelebration($('#celebration')); });
 reducedMotion.addEventListener('change', event => { if (event.matches) stopCelebration($('#celebration')); });
 document.addEventListener('pointerdown', () => { void unlockAudio(); }, { passive: true });
 

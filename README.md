@@ -27,11 +27,11 @@ The hash is checked against Node’s SHA-256 and fixed vectors. Algorithm refere
 
 ## Timed assessments
 
-The timer is off by default, with a 120-second editing preset. `?timer=120` or `game.newGame({timeLimit:120})` starts a timed round immediately. Clock checks use monotonic elapsed time alongside wall time; absolute deadlines survive reloads and shared round links. Every move, undo, and redo checks expiry. A move that crosses the deadline during calculation is not committed. The clock continues in menus and background tabs.
+The timer is off by default, with a 120-second editing preset. `?timer=120` or `game.newGame({timeLimit:120})` arms a timed round; the first valid move starts its clock. Invalid/no-op moves do not start it. Clock checks use monotonic elapsed time alongside wall time; absolute deadlines survive reloads and shared round links. Every move, undo, and redo checks expiry. A move that crosses the deadline during calculation is not committed. The clock continues in menus and background tabs. Untimed rounds count up from the first valid move in the same display.
 
 The UI retains Score, Best, and Moves. A timer near the title opens settings; results use a floating panel placed in space outside the board. Full mode badges open the new-game dialog. Starting a new game with a nonzero score requires confirmation. The synchronous API returns `needsConfirmation` and leaves the session intact unless `confirm:true` is provided or the dialog is confirmed.
 
-Assessment results include the peak tile (not rewound by undo), final score, score gain, action counts, mode, seed, size, duration, and deadline. Timed snapshots use `#round=`; older `#state=` and stored games remain compatible and untimed.
+Assessment results include the peak tile (not rewound by undo), final score, score gain, action counts, mode, seed, size, duration, and deadline. Saved-game snapshots use `#round=` and preserve the original start timestamp, elapsed time, and any countdown deadline. Ready rounds keep null timestamps until their first valid move. Older `#state=` and stored games remain compatible and untimed, with timing starting on the next valid move.
 
 All modes celebrate their first tile >=2047. The celebration uses 32 compositor-animated elements with no frame loop or pointer interception, cleans up after 1.9 seconds, and respects reduced motion. Its per-round flag persists across saves and undo/redo.
 
