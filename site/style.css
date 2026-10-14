@@ -107,3 +107,5 @@
   #new-form label{margin:6px 0;gap:6px}#new-form input,#new-form select{padding:8px}
   #new-form p.quiet{margin:8px 0}#new-form .primary{min-height:44px;margin-top:8px}#daily-button{min-height:30px}
 }
+
+#randomness-status{overflow-wrap:anywhere}

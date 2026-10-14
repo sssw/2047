@@ -10,9 +10,19 @@ Play at [apps.prof.ws/2047](https://apps.prof.ws/2047/) or [GitHub Pages](https:
 - Accessible DOM, documented JavaScript API, WebMCP tools, and URL configuration.
 - Responsive layouts, light/dark themes, reduced motion, and adjustable sound effects.
 
-The engine matches the iOS binary merge rules and uses FNV-1a seed hashing with SplitMix64. Classic and Insane spawn 1; 2048 spawns 2. Each tile merges at most once per move. Only a move that changes the board spawns a tile.
+The engine matches the iOS binary merge rules. Classic and Insane spawn 1; 2048 spawns 2. Each tile merges at most once per move. Only a move that changes the board spawns a tile.
 
 See [the interface documentation](site/api.html) or [agent.json](site/agent.json) for integration details. A reproducible session uses `?seed=hello&size=4&save=0`.
+
+## Tile generation
+
+Omitting the seed starts a random game. Every spawn draws fresh `crypto.getRandomValues()` entropy, with rejection sampling to avoid modulo bias. Future entropy is never part of a snapshot. Undo/redo restore recorded positions; a new move after undo draws fresh randomness. There is no clock-based or `Math.random()` fallback.
+
+Seeded version 2 uses a 256-bit SHA-256 chain coupled to the complete board, direction, previous chain state, seed, mode, shape, score, and move count. Each spawn performs 32 sequential hashes, followed by unbiased selection. This prevents a board-independent spawn stream and adds bounded work to each search branch. It cannot prevent simulation of a public deterministic algorithm and is not an anti-cheat mechanism. The synchronous engine keeps the existing API.
+
+Version 1 used seeds for all sessions, including automatically chosen ones. Saved boards and undo/redo snapshots upgrade to version 2 seeded continuation; the future sequence changes. Legacy URL save keys are recovered. Random URL configurations have stable save slots despite fresh starting boards. Fresh unseeded games use random mode.
+
+The hash is checked against Node’s SHA-256 and fixed vectors. Algorithm references: [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final) and [Web Crypto](https://www.w3.org/TR/webcrypto/#Crypto-method-getRandomValues).
 
 ## Run and test
 

@@ -1,0 +1,67 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>2047 browser checks</title>
+<style>body{font:15px system-ui;margin:24px}button{padding:12px}pre{white-space:pre-wrap}iframe{width:390px;max-width:100%;height:640px;border:1px solid #ccc}</style>
+<h1>2047 browser checks</h1><p>Run on a local test origin. Checks preserve and restore any existing 2047 storage on this origin.</p>
+<button id="run">Run checks</button><pre id="result">Ready.</pre><iframe id="game" title="Game under test"></iframe>
+<script type="module">
+import { validateState } from '../site/engine.js';
+const frame=document.querySelector('#game'), output=document.querySelector('#result');
+const fixture=await (await fetch('./fixtures/legacy-session.json')).json();
+const keys=['2047.sessions.v1','2047.preferences.v1','2047.best.v1'];
+const stored=()=>Object.fromEntries(keys.map(key=>[key,localStorage.getItem(key)]));
+const reset=()=>keys.forEach(key=>localStorage.removeItem(key));
+const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const snapshot=game=>{const {version,rows,columns,mode,seed,randomness,grid,score,moves,rng,lastSpawn}=game.getState();return {version,rows,columns,mode,seed,randomness,grid,score,moves,rng,lastSpawn}};
+const load=query=>new Promise(resolve=>{frame.onload=()=>resolve(frame.contentWindow.game2047);frame.src='../site/'+query;});
+const unload=()=>new Promise(resolve=>{frame.onload=resolve;frame.src='about:blank';});
+document.querySelector('#run').onclick=async()=>{
+ const backup=stored(), checks=[];
+ const check=(condition,name)=>{if(!condition)throw new Error(name);checks.push(name);output.textContent=JSON.stringify({complete:false,checks},null,2)};
+ document.querySelector('#run').disabled=true;
+ try {
+  reset();
+  let game=await load('?motion=0&sound=0');
+  check(game.getState().randomness==='random','Default game is random');
+  const initial=snapshot(game);game.move(game.getState().legalMoves[0]);const moved=snapshot(game);
+  game.undo();check(equal(snapshot(game),initial),'Undo restores the exact random-game position');
+  game.redo();check(equal(snapshot(game),moved),'Redo restores the recorded random tile');
+  await unload();game=await load('?motion=0&sound=0');
+  check(equal(snapshot(game),moved),'Random default game survives reload');
+  let rejected=false;try{game.shareURL({challenge:true})}catch{rejected=true}
+  check(rejected,'Random games cannot claim a repeatable starting seed');
+  const share=new URL(game.shareURL());share.search='?save=0&motion=0&sound=0';
+  await unload();game=await load(share.search+share.hash);
+  check(equal(snapshot(game),moved)&&game.getState().rng===null,'Random snapshot restores the board without future entropy');
+
+  game=await load('?mode=insane&size=3&motion=0&sound=0');
+  game.move(game.getState().legalMoves[0]);const randomURL=snapshot(game);
+  await unload();game=await load('?mode=insane&size=3&motion=0&sound=0');
+  check(equal(snapshot(game),randomURL),'Unseeded URL has a stable save slot');
+
+  game=await load('?seed=browser-check&size=4&save=0&motion=0&sound=0');
+  const start=snapshot(game), directions=[];
+  for(let n=0;n<12;n++){const choices=game.getState().legalMoves;if(!choices.length)break;directions.push(choices[n%choices.length]);game.move(directions.at(-1))}
+  const replay=snapshot(game), seededLink=new URL(game.shareURL());seededLink.search='?save=0&motion=0&sound=0';
+  await unload();game=await load('?seed=browser-check&size=4&save=0&motion=0&sound=0');
+  check(equal(snapshot(game),start),'Seeded initial position repeats');
+  for(const direction of directions)game.move(direction);
+  check(equal(snapshot(game),replay),'Seeded sequence repeats after reload');
+  const nextDirection=game.getState().legalMoves[0];game.move(nextDirection);const continuation=snapshot(game);
+  await unload();game=await load(seededLink.search+seededLink.hash);game.move(nextDirection);
+  check(equal(snapshot(game),continuation),'Seeded share preserves the next move');
+
+  await unload();reset();
+  localStorage.setItem(keys[0],JSON.stringify({default:{state:fixture.state,past:fixture.past,future:fixture.future,updated:1}}));
+  game=await load('?motion=0&sound=0');
+  check(equal(snapshot(game),validateState(fixture.state)),'Legacy default board upgrades without losing progress');
+  game.undo();check(equal(snapshot(game),validateState(fixture.past.at(-1))),'Legacy undo history survives upgrade');
+  game.redo();game.redo();check(equal(snapshot(game),validateState(fixture.future.at(-1))),'Legacy redo history survives upgrade');
+
+  await unload();reset();
+  localStorage.setItem(keys[0],JSON.stringify({[fixture.key]:{state:fixture.state,past:fixture.past,future:fixture.future,updated:1}}));
+  const oldURL=new URL(fixture.url);game=await load(oldURL.search+'&motion=0&sound=0');
+  check(equal(snapshot(game),validateState(fixture.state)),'Legacy seeded URL recovers its original save slot');
+  output.textContent=JSON.stringify({complete:true,passed:checks.length,checks},null,2);
+ } catch(error) {output.textContent=JSON.stringify({complete:true,passed:checks.length,error:error.message,checks},null,2)}
+ finally {await unload();reset();for(const key of keys)if(backup[key]!==null)localStorage.setItem(key,backup[key]);document.querySelector('#run').disabled=false}
+};
+</script></html>

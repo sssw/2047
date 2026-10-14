@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-import { DIRECTIONS, MODES, newGame, move, legalMoves, validateState, encodeState, launchFromURL, hashSeed } from './engine.js';
+import { DIRECTIONS, MODES, newGame, move, legalMoves, validateState, encodeState, launchFromURL, legacySessionKey, hashSeed } from './engine.js?v=20261014-random2';
 import { bitGlyph } from './glyph.js';
 
 const elements = new Map();
@@ -13,7 +13,8 @@ const saveEnabled = url.searchParams.get('save') !== '0';
 const defaults = { controls: false, bits: true, display: 'both', motion: false, theme: 'system', sound: true, volume: 0.35 };
 let storageOK = true, past = [], future = [], state, sessionKey = 'default', sessions = {}, bestScores = {};
 let statusMessage = 'Make your first move.';
-const randomSeed = () => Array.from(crypto.getRandomValues(new Uint32Array(2)), n => n.toString(16).padStart(8, '0')).join('');
+const gameParameters = ['seed', 'mode', 'rows', 'cols', 'size', 'moves', 'board', 'score'];
+let previousSessionKey = null;
 
 function readStorage(key, fallback) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
@@ -46,23 +47,31 @@ if (saveEnabled) {
 try {
   state = launchFromURL(url);
   if (state) {
-    sessionKey = 'link-' + hashSeed(encodeState(state)).toString(16);
+    const identity = url.hash.startsWith('#state=') ? encodeState(state)
+      : JSON.stringify(gameParameters.filter(key => url.searchParams.has(key)).map(key => [key, url.searchParams.get(key)]));
+    sessionKey = 'link2-' + hashSeed(identity).toString(16);
+    if (saveEnabled && !sessions[sessionKey]) {
+      // Snapshot saves used an earlier key even after version 1.
+      const snapshotKey = 'link-' + hashSeed(encodeState(state)).toString(16);
+      if (sessions[snapshotKey]) previousSessionKey = snapshotKey;
+      else if (Object.values(sessions).some(saved => saved?.state?.version === 1)) previousSessionKey = legacySessionKey(url);
+    }
     statusMessage = 'Challenge loaded. Make it count.';
   }
 } catch (error) { statusMessage = `${error.message} Your normal session is unchanged.`; }
 
-if (saveEnabled && sessions[sessionKey]) {
+if (saveEnabled && (sessions[sessionKey] || sessions[previousSessionKey])) {
   try {
-    const saved = sessions[sessionKey];
+    const saved = sessions[sessionKey] || sessions[previousSessionKey];
     const restored = validateState(saved.state);
     const previous = (Array.isArray(saved.past) ? saved.past : []).slice(-100).map(validateState);
     const next = (Array.isArray(saved.future) ? saved.future : []).slice(-100).map(validateState);
-    if ([...previous, ...next].some(s => s.rows !== restored.rows || s.columns !== restored.columns || s.mode !== restored.mode || s.seed !== restored.seed)) throw new Error('Incompatible history.');
+    if ([...previous, ...next].some(s => s.rows !== restored.rows || s.columns !== restored.columns || s.mode !== restored.mode || s.seed !== restored.seed || s.randomness !== restored.randomness)) throw new Error('Incompatible history.');
     state = restored; past = previous; future = next;
     if (!statusMessage.includes('unchanged')) statusMessage = 'Welcome back. Your game is right here.';
   } catch { statusMessage = 'This saved game could not be read. A fresh board is ready.'; }
 }
-state ??= newGame({ seed: randomSeed() });
+state ??= newGame();
 
 const bestKey = () => `${state.mode}:${state.rows}x${state.columns}`;
 let saveTask = null, saveDirty = false, queuedState = null, queuedHistory = '', savedPreferences = '', savedBest = '';
@@ -203,8 +212,9 @@ function render(effect = {}) {
   $('#mode-pill').textContent = state.mode.toUpperCase();
   $('#mode-label').textContent = state.mode === 'classic' ? 'THE BINARY PUZZLE' : `${state.mode.toUpperCase()} MODE`;
   $('#target-label').textContent = snapshot.target;
-  $('#session-label').textContent = `${state.rows} × ${state.columns} · ${state.seed}`;
-  $('#session-label').title = `Seed: ${state.seed}`;
+  $('#session-label').textContent = `${state.rows} × ${state.columns} · ${state.randomness === 'random' ? 'Random' : state.seed}`;
+  $('#session-label').title = state.randomness === 'random' ? 'Fresh random tiles each move' : `Seed: ${state.seed}`;
+  $('#randomness-status').textContent = state.randomness === 'random' ? 'Random · fresh tiles each move' : `Seeded · ${state.seed}`;
   $('#save-label').textContent = saveEnabled && storageOK ? (saveDirty ? 'Autosave on' : 'Saved locally') : 'Session only';
   $('#save-label').title = saveEnabled && storageOK ? 'Saved in this browser' : 'Use Share to keep this game. Local saving is disabled or unavailable.';
   $('#undo-button').disabled = !past.length;
@@ -334,10 +344,10 @@ function redo() {
 
 function startGame(config = {}) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('Invalid game configuration.');
-  const next = newGame({ ...config, seed: config.seed?.trim() || randomSeed() });
+  const next = newGame({ ...config, seed: typeof config.seed === 'string' && !config.seed.trim() ? null : config.seed });
   state = next; past = []; future = []; sessionKey = 'default';
   const clean = new URL(location.href);
-  for (const key of ['seed', 'mode', 'rows', 'cols', 'size', 'moves', 'board', 'score']) clean.searchParams.delete(key);
+  for (const key of gameParameters) clean.searchParams.delete(key);
   clean.hash = '';
   history.replaceState(null, '', clean);
   statusMessage = 'A fresh board. Make your first move.';
@@ -362,6 +372,7 @@ function shareURL(challenge = false) {
   const link = new URL(location.href);
   link.search = ''; link.hash = '';
   if (challenge) {
+    if (state.randomness !== 'seeded') throw new Error('Random games have no starting seed. Share a saved-game link instead.');
     link.searchParams.set('seed', state.seed);
     link.searchParams.set('mode', state.mode);
     link.searchParams.set('rows', state.rows);
@@ -371,9 +382,11 @@ function shareURL(challenge = false) {
 }
 function openShare(challenge = false) {
   $('#share-url').value = shareURL(challenge);
-  $('#share-description').textContent = challenge ? 'Same seed and settings. A fresh board for a friend.' : 'This link includes your board, score, and next spawn sequence.';
+  $('#share-description').textContent = challenge ? 'Same seed and settings. A fresh board for a friend.'
+    : state.randomness === 'seeded' ? 'This link keeps your board, score, and repeatable continuation.'
+    : 'This link keeps your board and score. Future tiles are freshly randomized.';
   $('#share-feedback').textContent = '';
-  $('#challenge-button').hidden = challenge;
+  $('#challenge-button').hidden = challenge || state.randomness !== 'seeded';
   showDialog('#share-dialog');
 }
 

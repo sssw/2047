@@ -87,6 +87,6 @@ test('Malformed inputs fail before altering a board',()=>{
     assert.throws(()=>launchFromURL(new URL(link)),query);
   }
   const s=newGame({seed:'valid'});
-  for(const change of [{rng:'-1'},{rng:'18446744073709551616'},{moves:-1},{score:NaN},{grid:Array(16).fill(0)},{version:2},{seed:3}]) assert.throws(()=>validateState({...s,...change}));
+  for(const change of [{rng:'-1'},{rng:'18446744073709551616'},{moves:-1},{score:NaN},{grid:Array(16).fill(0)},{version:3},{seed:3}]) assert.throws(()=>validateState({...s,...change}));
   assert.throws(()=>decodeState('a'.repeat(6001)));
 });

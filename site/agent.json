@@ -1,6 +1,6 @@
 {
   "name": "2047 Binary Merge",
-  "version": 1,
+  "version": 2,
   "documentation": "./api.html",
   "javascript": "window.game2047",
   "stateSelector": "#game-state",
@@ -12,5 +12,6 @@
   "webmcpTools": ["game2047_get_state", "game2047_move", "game2047_new_game", "game2047_undo", "game2047_redo"],
   "urlParameters": ["seed", "mode", "size", "rows", "cols", "moves", "board", "score", "controls", "bits", "display", "sound", "volume", "theme", "motion", "save"],
   "reproducibleExample": "./?seed=hello&mode=classic&size=4&save=0",
+  "randomness": { "default": "random", "seedProvided": "seeded", "randomSnapshot": "Restores position; future tiles use fresh randomness", "seededSnapshot": "Preserves deterministic continuation", "startingSeedLink": "Seeded games only" },
   "license": "PolyForm-Noncommercial-1.0.0"
 }
