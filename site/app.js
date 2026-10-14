@@ -274,30 +274,40 @@ function render(effect = {}) {
 }
 
 function fitBoard() {
-  const landscape = matchMedia('(orientation:landscape) and (max-height:500px)').matches;
-  const scorebar = $('.scorebar'), tools = $('.game-tools');
-  if (landscape && scorebar.parentElement !== $('.intro')) {
-    $('.intro').append(scorebar); $('.intro-heading').append(tools);
-  } else if (!landscape && scorebar.parentElement !== $('.play-area')) {
-    $('.play-area').prepend(scorebar); scorebar.append(tools);
+  const sideBySide = matchMedia('(orientation:landscape) and (min-width:480px)').matches;
+  const intro = $('.intro'), playArea = $('.play-area');
+  const scorebar = $('.scorebar'), tools = $('.game-tools'), status = $('.status');
+  if (sideBySide && scorebar.parentElement !== intro) {
+    intro.append(scorebar, status); $('.intro-heading').append(tools);
+  } else if (!sideBySide && scorebar.parentElement !== playArea) {
+    playArea.prepend(scorebar); scorebar.append(tools); playArea.append(status);
   }
-  const stacked = matchMedia('(max-width:600px), (min-width:601px) and (orientation:portrait)').matches;
-  const layoutStyle = getComputedStyle($('.game-layout'));
-  const shellStyle = getComputedStyle($('.app-shell'));
-  const height = selector => $(selector)?.getBoundingClientRect().height ?? 0;
-  const spacing = Number.parseFloat(layoutStyle.paddingTop) + Number.parseFloat(layoutStyle.paddingBottom)
-    + Number.parseFloat(shellStyle.paddingTop) + Number.parseFloat(shellStyle.paddingBottom);
-  const reserved = height('.topbar') + height('footer') + spacing + height('.play-area') - height('#board')
-    + (stacked ? height('.intro') + Number.parseFloat(layoutStyle.rowGap) : 0);
-  const availableHeight = Math.max(170, innerHeight - reserved - 2);
-  $('#board').parentElement.style.maxWidth = `min(100%, ${availableHeight * state.columns / state.rows}px)`;
-  const width = $('#board').getBoundingClientRect().width;
-  $('#board').dataset.compact = width / state.columns < 42;
-  $('.status').style.width = `min(100%, ${Math.max(width, 220)}px)`;
-  $('.under-board').style.maxWidth = `min(100%, ${width}px)`;
+  const shell = $('.app-shell'), layout = $('.game-layout'), board = $('#board');
+  const shellStyle = getComputedStyle(shell), layoutStyle = getComputedStyle(layout);
+  const pixels = value => Number.parseFloat(value) || 0;
+  const outerHeight = element => {
+    const style = getComputedStyle(element);
+    return style.display === 'none' ? 0 : element.getBoundingClientRect().height + pixels(style.marginTop) + pixels(style.marginBottom);
+  };
+  const reserved = pixels(shellStyle.paddingTop) + pixels(shellStyle.paddingBottom) + outerHeight($('footer'))
+    + pixels(layoutStyle.paddingTop) + pixels(layoutStyle.paddingBottom)
+    + (sideBySide ? 0 : outerHeight(intro) + pixels(layoutStyle.rowGap) + outerHeight(scorebar) + outerHeight(status));
+  // Measure the dynamic viewport, including Safari's expanded toolbar and safe areas.
+  // Pinch zoom stays available and does not resize the underlying game layout.
+  const viewportHeight = window.visualViewport?.scale === 1 ? Math.min(innerHeight, visualViewport.height) : innerHeight;
+  const availableHeight = Math.max(0, Math.min(shell.clientHeight, viewportHeight) - reserved - 1);
+  const width = Math.min(playArea.clientWidth, availableHeight * state.columns / state.rows);
+  board.parentElement.style.width = `${Math.floor(width * 100) / 100}px`;
+  board.dataset.compact = width / state.columns < 42;
 }
-window.addEventListener('resize', () => requestAnimationFrame(fitBoard));
-window.visualViewport?.addEventListener('resize', () => requestAnimationFrame(fitBoard));
+let fitFrame = 0;
+function scheduleFit() {
+  if (fitFrame) return;
+  fitFrame = requestAnimationFrame(() => { fitFrame = 0; fitBoard(); });
+}
+window.addEventListener('resize', scheduleFit);
+window.visualViewport?.addEventListener('resize', scheduleFit);
+window.addEventListener('pageshow', scheduleFit);
 
 function performMove(direction) {
   const previous = state, result = move(state, direction);
