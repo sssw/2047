@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm test
+      - run: node --check site/app.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

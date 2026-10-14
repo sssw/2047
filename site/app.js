@@ -2,11 +2,15 @@
 import { DIRECTIONS, MODES, newGame, move, legalMoves, validateState, encodeState, launchFromURL, hashSeed } from './engine.js';
 import { bitGlyph } from './glyph.js';
 
-const $ = selector => document.querySelector(selector);
+const elements = new Map();
+const $ = selector => {
+  if (!elements.has(selector)) elements.set(selector, document.querySelector(selector));
+  return elements.get(selector);
+};
 const STORE = '2047.sessions.v1', PREFS = '2047.preferences.v1', BEST = '2047.best.v1';
 const url = new URL(location.href);
 const saveEnabled = url.searchParams.get('save') !== '0';
-const defaults = { controls: true, bits: true, display: 'both', motion: false, theme: 'system' };
+const defaults = { controls: false, bits: true, display: 'both', motion: false, theme: 'system', sound: true, volume: 0.35 };
 let storageOK = true, past = [], future = [], state, sessionKey = 'default', sessions = {}, bestScores = {};
 let statusMessage = 'Make your first move.';
 const randomSeed = () => Array.from(crypto.getRandomValues(new Uint32Array(2)), n => n.toString(16).padStart(8, '0')).join('');
@@ -19,11 +23,14 @@ function readStorage(key, fallback) {
 function validPreferences(value) {
   if (!value || typeof value !== 'object') return { ...defaults };
   const display = ['both', 'bits', 'numbers'].includes(value.display) ? value.display : value.bits === false ? 'numbers' : 'both';
-  return { controls: typeof value.controls === 'boolean' ? value.controls : true, bits: display !== 'numbers', display, motion: value.motion === true, theme: ['light', 'dark', 'system'].includes(value.theme) ? value.theme : 'system' };
+  return { controls: value.controls === true && value.controlsChosen === true, controlsChosen: value.controlsChosen === true, bits: display !== 'numbers', display, motion: value.motion === true, theme: ['light', 'dark', 'system'].includes(value.theme) ? value.theme : 'system', sound: value.sound !== false, volume: Number.isFinite(value.volume) && value.volume >= 0 && value.volume <= 1 ? value.volume : .35 };
 }
 
 let preferences = validPreferences(readStorage(PREFS, defaults));
 for (const option of ['controls', 'bits']) if (['0', '1'].includes(url.searchParams.get(option))) preferences[option] = url.searchParams.get(option) === '1';
+if (['0', '1'].includes(url.searchParams.get('controls'))) preferences.controlsChosen = true;
+if (['0', '1'].includes(url.searchParams.get('sound'))) preferences.sound = url.searchParams.get('sound') === '1';
+if (url.searchParams.has('volume') && Number.isFinite(Number(url.searchParams.get('volume'))) && Number(url.searchParams.get('volume')) >= 0 && Number(url.searchParams.get('volume')) <= 1) preferences.volume = Number(url.searchParams.get('volume'));
 if (['0', '1'].includes(url.searchParams.get('bits'))) preferences.display = preferences.bits ? 'both' : 'numbers';
 if (['both', 'bits', 'numbers'].includes(url.searchParams.get('display'))) preferences.display = url.searchParams.get('display');
 preferences.bits = preferences.display !== 'numbers';
@@ -58,76 +65,181 @@ if (saveEnabled && sessions[sessionKey]) {
 state ??= newGame({ seed: randomSeed() });
 
 const bestKey = () => `${state.mode}:${state.rows}x${state.columns}`;
-function persist() {
-  bestScores[bestKey()] = Math.max(bestScores[bestKey()] || 0, state.score);
-  if (!saveEnabled) return;
+let saveTask = null, saveDirty = false, queuedState = null, queuedHistory = '', savedPreferences = '', savedBest = '';
+function flushSave() {
+  if (saveTask) {
+    if (saveTask.idle) cancelIdleCallback(saveTask.id);
+    else clearTimeout(saveTask.id);
+    saveTask = null;
+  }
+  if (!saveEnabled || !saveDirty) return;
+  saveDirty = false;
   try {
     sessions[sessionKey] = { state, past, future, updated: Date.now() };
     const keys = Object.keys(sessions).sort((a, b) => (sessions[b]?.updated || 0) - (sessions[a]?.updated || 0));
     for (const key of keys.slice(8)) if (key !== sessionKey) delete sessions[key];
     localStorage.setItem(STORE, JSON.stringify(sessions));
-    localStorage.setItem(PREFS, JSON.stringify(preferences));
-    localStorage.setItem(BEST, JSON.stringify(bestScores));
+    const prefText = JSON.stringify(preferences), bestText = JSON.stringify(bestScores);
+    if (prefText !== savedPreferences) { localStorage.setItem(PREFS, prefText); savedPreferences = prefText; }
+    if (bestText !== savedBest) { localStorage.setItem(BEST, bestText); savedBest = bestText; }
     storageOK = true;
   } catch { storageOK = false; }
+  $('#save-label').textContent = storageOK ? 'Saved locally' : 'Session only';
+  $('#save-label').title = storageOK ? 'Saved in this browser' : 'Use Share to keep this game. Local storage is unavailable.';
 }
 
+function persist() {
+  bestScores[bestKey()] = Math.max(bestScores[bestKey()] || 0, state.score);
+  if (!saveEnabled) return;
+  const signature = `${past.length}:${future.length}:${JSON.stringify(preferences)}`;
+  if (queuedState === state && queuedHistory === signature) return;
+  queuedState = state; queuedHistory = signature; saveDirty = true;
+  if (!saveTask) {
+    saveTask = typeof requestIdleCallback === 'function'
+      ? { idle: true, id: requestIdleCallback(flushSave, { timeout: 200 }) }
+      : { idle: false, id: setTimeout(flushSave, 80) };
+  }
+}
+
+let legalState = null, cachedMoves = [];
 function getState() {
-  const available = legalMoves(state);
+  if (legalState !== state) { cachedMoves = legalMoves(state); legalState = state; }
+  const available = cachedMoves;
   return structuredClone({ ...state, highestTile: Math.max(...state.grid), target: state.mode === '2048' ? 2048 : 2047, won: Math.max(...state.grid) >= (state.mode === '2048' ? 2048 : 2047), gameOver: available.length === 0, legalMoves: available, canUndo: past.length > 0, canRedo: future.length > 0, bestScore: Math.max(bestScores[bestKey()] || 0, state.score), persistence: saveEnabled && storageOK ? 'local' : 'session-only', preferences });
 }
 
+let appliedPreferences = '';
 function applyPreferences() {
+  const signature = JSON.stringify(preferences);
+  if (signature === appliedPreferences) return false;
+  appliedPreferences = signature;
   if (preferences.theme === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = preferences.theme;
   document.documentElement.classList.toggle('reduce-motion', preferences.motion);
   $('#direction-pad').hidden = !preferences.controls;
+  $('.direction-section').hidden = !preferences.controls;
   $('#controls-button').innerHTML = `${preferences.controls ? 'Hide' : 'Show'} controls <span aria-hidden="true">${preferences.controls ? '−' : '+'}</span>`;
   $('#controls-button').setAttribute('aria-expanded', String(preferences.controls));
   $('#controls-setting').checked = preferences.controls;
   $('#display-setting').value = preferences.display;
   $('#motion-setting').checked = preferences.motion;
   $('#theme-setting').value = preferences.theme;
+  $('#sound-setting').checked = preferences.sound;
+  $('#volume-setting').value = Math.round(preferences.volume * 100);
+  $('#volume-output').textContent = `${Math.round(preferences.volume * 100)}%`;
+  updateSoundLabel();
+  return true;
+}
+
+let audioContext = null, lastSoundAt = -1;
+function updateSoundLabel() {
+  $('#sound-status').textContent = !preferences.sound || preferences.volume === 0 ? 'Sound is off.' : audioContext?.state === 'running' ? 'Sound is on.' : 'Sound starts with your first tap or key press.';
+}
+function unlockAudio() {
+  if (!preferences.sound || preferences.volume === 0) return Promise.resolve(false);
+  if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return Promise.resolve(false);
+  try {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return Promise.resolve(false);
+    audioContext ??= new Context({ latencyHint: 'interactive' });
+    const ready = audioContext.state === 'suspended' ? audioContext.resume() : Promise.resolve();
+    return ready.then(() => { updateSoundLabel(); return audioContext.state === 'running'; }).catch(() => false);
+  } catch { return Promise.resolve(false); }
+}
+function playSound(gain = 0, won = false) {
+  if (!preferences.sound || preferences.volume === 0) return;
+  void unlockAudio().then(ready => {
+    if (!ready || !preferences.sound || preferences.volume === 0) return;
+    const now = audioContext.currentTime;
+    if (now - lastSoundAt < .035) return;
+    lastSoundAt = now;
+    const frequency = gain ? 440 * 2 ** ((Math.floor(Math.log2(gain)) % 6) / 12) : 440;
+    const notes = won ? [1, 1.25, 1.5] : gain ? [1, 1.5] : [1];
+    notes.forEach((ratio, index) => {
+      const start = now + index * .035, duration = gain ? .13 : .055;
+      const oscillator = audioContext.createOscillator(), envelope = audioContext.createGain();
+      oscillator.type = gain ? 'sine' : 'triangle';
+      oscillator.frequency.setValueAtTime(frequency * ratio, start);
+      oscillator.frequency.exponentialRampToValueAtTime(frequency * ratio * .92, start + duration);
+      envelope.gain.setValueAtTime(.0001, start);
+      envelope.gain.exponentialRampToValueAtTime(preferences.volume * (gain ? .32 : .20), start + .005);
+      envelope.gain.exponentialRampToValueAtTime(.0001, start + duration);
+      oscillator.connect(envelope); envelope.connect(audioContext.destination);
+      oscillator.start(start); oscillator.stop(start + duration + .01);
+      oscillator.onended = () => { oscillator.disconnect(); envelope.disconnect(); };
+    });
+  });
+}
+
+let renderedShape = '', renderedDisplay = '', cells = [];
+const numberFormat = new Intl.NumberFormat('en-US');
+const reducedMotion = matchMedia('(prefers-reduced-motion:reduce)');
+const glyphTemplates = new Map();
+const tileAnimations = new WeakMap();
+function glyphElement(value) {
+  if (!glyphTemplates.has(value)) {
+    const glyph = bitGlyph(value), panel = document.createElement('span');
+    panel.className = 'bit-glyph'; panel.style.setProperty('--bit-side', glyph.side);
+    panel.setAttribute('aria-hidden', 'true'); panel.title = `${value} in binary: ${glyph.binary}`;
+    for (const bit of glyph.cells) {
+      const square = document.createElement('span');
+      square.className = `bit-cell is-${bit}`; square.dataset.bit = bit;
+      if (bit === 'one') square.textContent = '1';
+      panel.append(square);
+    }
+    if (glyphTemplates.size >= 256) glyphTemplates.delete(glyphTemplates.keys().next().value);
+    glyphTemplates.set(value, panel);
+  }
+  return glyphTemplates.get(value).cloneNode(true);
 }
 
 function render(effect = {}) {
   persist();
   const snapshot = getState(), board = $('#board');
-  applyPreferences();
-  $('#score').textContent = state.score.toLocaleString('en-US');
-  $('#best').textContent = snapshot.bestScore.toLocaleString('en-US');
-  $('#moves').textContent = state.moves.toLocaleString('en-US');
+  const preferencesChanged = applyPreferences();
+  $('#score').textContent = numberFormat.format(state.score);
+  $('#best').textContent = numberFormat.format(snapshot.bestScore);
+  $('#moves').textContent = numberFormat.format(state.moves);
   $('#mode-pill').textContent = state.mode.toUpperCase();
   $('#mode-label').textContent = state.mode === 'classic' ? 'THE BINARY PUZZLE' : `${state.mode.toUpperCase()} MODE`;
   $('#target-label').textContent = snapshot.target;
   $('#session-label').textContent = `${state.rows} × ${state.columns} · ${state.seed}`;
   $('#session-label').title = `Seed: ${state.seed}`;
-  $('#save-label').textContent = saveEnabled && storageOK ? 'Saved locally' : 'Session only';
+  $('#save-label').textContent = saveEnabled && storageOK ? (saveDirty ? 'Autosave on' : 'Saved locally') : 'Session only';
   $('#save-label').title = saveEnabled && storageOK ? 'Saved in this browser' : 'Use Share to keep this game. Local saving is disabled or unavailable.';
   $('#undo-button').disabled = !past.length;
   $('#redo-button').disabled = !future.length;
   document.querySelectorAll('[data-direction]').forEach(button => { button.disabled = !snapshot.legalMoves.includes(button.dataset.direction); });
   $('#end-banner').hidden = !snapshot.gameOver;
   $('#status').textContent = snapshot.gameOver ? 'No moves left. Undo or start a new game.' : statusMessage;
-  board.setAttribute('aria-rowcount', state.rows);
-  board.setAttribute('aria-colcount', state.columns);
   board.dataset.mode = state.mode;
   board.dataset.score = state.score;
   board.dataset.moves = state.moves;
-  board.style.setProperty('--rows', state.rows);
-  board.style.setProperty('--columns', state.columns);
-  board.style.gridTemplateColumns = `repeat(${state.columns}, minmax(0, 1fr))`;
-  board.style.gridTemplateRows = `repeat(${state.rows}, minmax(0, 1fr))`;
-  const fragment = document.createDocumentFragment();
-  for (let row = 0; row < state.rows; row++) {
-    const rowElement = document.createElement('div');
-    rowElement.className = 'board-row'; rowElement.setAttribute('role', 'row'); rowElement.setAttribute('aria-rowindex', row + 1);
-    for (let column = 0; column < state.columns; column++) {
-      const index = row * state.columns + column, value = state.grid[index];
-      const cell = document.createElement('div');
-      cell.className = 'tile';
-      cell.setAttribute('role', 'gridcell'); cell.setAttribute('aria-colindex', column + 1);
-      cell.dataset.row = row; cell.dataset.column = column; cell.dataset.value = value;
+  const shape = `${state.rows}x${state.columns}`, shapeChanged = shape !== renderedShape;
+  if (shapeChanged) {
+    board.setAttribute('aria-rowcount', state.rows); board.setAttribute('aria-colcount', state.columns);
+    board.style.setProperty('--rows', state.rows); board.style.setProperty('--columns', state.columns);
+    board.style.gridTemplateColumns = `repeat(${state.columns}, minmax(0, 1fr))`;
+    board.style.gridTemplateRows = `repeat(${state.rows}, minmax(0, 1fr))`;
+    const fragment = document.createDocumentFragment(); cells = [];
+    for (let row = 0; row < state.rows; row++) {
+      const rowElement = document.createElement('div');
+      rowElement.className = 'board-row'; rowElement.setAttribute('role', 'row'); rowElement.setAttribute('aria-rowindex', row + 1);
+      for (let column = 0; column < state.columns; column++) {
+        const cell = document.createElement('div'); cell.className = 'tile';
+        cell.setAttribute('role', 'gridcell'); cell.setAttribute('aria-colindex', column + 1);
+        cell.dataset.row = row; cell.dataset.column = column;
+        rowElement.append(cell); cells.push(cell);
+      }
+      fragment.append(rowElement);
+    }
+    board.replaceChildren(fragment); renderedShape = shape;
+  }
+  state.grid.forEach((value, index) => {
+    const cell = cells[index], row = Math.floor(index / state.columns), column = index % state.columns;
+    if (cell.dataset.value !== String(value) || renderedDisplay !== preferences.display) {
+      tileAnimations.get(cell)?.cancel();
+      cell.replaceChildren(); cell.dataset.value = value;
       cell.setAttribute('aria-label', `Row ${row + 1}, column ${column + 1}: ${value || 'empty'}`);
       if (value) {
         cell.dataset.level = Math.min(10, Math.floor(Math.log2(value)));
@@ -139,34 +251,36 @@ function render(effect = {}) {
           number.textContent = value;
           cell.append(number);
         }
-        if (preferences.bits) {
-          const glyph = bitGlyph(value), panel = document.createElement('span');
-          panel.className = 'bit-glyph'; panel.style.setProperty('--bit-side', glyph.side);
-          panel.setAttribute('aria-hidden', 'true'); panel.title = `${value} in binary: ${glyph.binary}`;
-          for (const bit of glyph.cells) {
-            const square = document.createElement('span');
-            square.className = `bit-cell is-${bit}`;
-            square.dataset.bit = bit;
-            if (bit === 'one') square.textContent = '1';
-            panel.append(square);
-          }
-          cell.append(panel);
-        }
+        if (preferences.bits) cell.append(glyphElement(value));
+      } else {
+        delete cell.dataset.level; delete cell.dataset.display; delete cell.dataset.bits;
       }
-      if (effect.changed && index === state.lastSpawn) cell.classList.add('spawn');
-      if (effect.merged?.includes(index)) cell.classList.add('merge');
-      rowElement.append(cell);
     }
-    fragment.append(rowElement);
-  }
-  board.replaceChildren(fragment);
-  fitBoard();
+    if (!preferences.motion && !reducedMotion.matches && effect.changed) {
+      if (index === state.lastSpawn || effect.merged?.includes(index)) {
+        tileAnimations.get(cell)?.cancel();
+        const frames = index === state.lastSpawn
+          ? [{ transform: 'scale(.86)', opacity: .6 }, { transform: 'scale(1)', opacity: 1 }]
+          : [{ transform: 'scale(1)' }, { transform: 'scale(1.06)' }, { transform: 'scale(1)' }];
+        tileAnimations.set(cell, cell.animate(frames, { duration: 150, easing: 'ease-out' }));
+      }
+    }
+  });
+  renderedDisplay = preferences.display;
+  if (shapeChanged || preferencesChanged) fitBoard();
   $('#game-state').textContent = JSON.stringify(snapshot);
   window.dispatchEvent(new CustomEvent('game2047:change', { detail: snapshot }));
   return snapshot;
 }
 
 function fitBoard() {
+  const landscape = matchMedia('(orientation:landscape) and (max-height:500px)').matches;
+  const scorebar = $('.scorebar'), tools = $('.game-tools');
+  if (landscape && scorebar.parentElement !== $('.intro')) {
+    $('.intro').append(scorebar); $('.intro-heading').append(tools);
+  } else if (!landscape && scorebar.parentElement !== $('.play-area')) {
+    $('.play-area').prepend(scorebar); scorebar.append(tools);
+  }
   const stacked = matchMedia('(max-width:600px), (min-width:601px) and (orientation:portrait)').matches;
   const layoutStyle = getComputedStyle($('.game-layout'));
   const shellStyle = getComputedStyle($('.app-shell'));
@@ -177,7 +291,10 @@ function fitBoard() {
     + (stacked ? height('.intro') + Number.parseFloat(layoutStyle.rowGap) : 0);
   const availableHeight = Math.max(170, innerHeight - reserved - 2);
   $('#board').parentElement.style.maxWidth = `min(100%, ${availableHeight * state.columns / state.rows}px)`;
-  $('#board').dataset.compact = $('#board').getBoundingClientRect().width / state.columns < 42;
+  const width = $('#board').getBoundingClientRect().width;
+  $('#board').dataset.compact = width / state.columns < 42;
+  $('.status').style.width = `min(100%, ${Math.max(width, 220)}px)`;
+  $('.under-board').style.maxWidth = `min(100%, ${width}px)`;
 }
 window.addEventListener('resize', () => requestAnimationFrame(fitBoard));
 window.visualViewport?.addEventListener('resize', () => requestAnimationFrame(fitBoard));
@@ -189,6 +306,7 @@ function performMove(direction) {
     state = result.state;
     const target = state.mode === '2048' ? 2048 : 2047;
     statusMessage = Math.max(...previous.grid) < target && Math.max(...state.grid) >= target ? `${target} reached. Beautifully done — keep going!` : result.gain ? `+${result.gain} · Keep the bits moving.` : 'A little more room.';
+    playSound(result.gain, Math.max(...previous.grid) < target && Math.max(...state.grid) >= target);
   } else statusMessage = `No move ${direction}. Try another direction.`;
   return { changed: result.changed, gain: result.gain, state: render(result) };
 }
@@ -267,18 +385,26 @@ $('#copy-button').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('#share-url').value); $('#share-feedback').textContent = 'Copied. Ready to share.'; }
   catch { $('#share-url').focus(); $('#share-url').select(); $('#share-feedback').textContent = 'Select and copy the link above.'; }
 });
-$('#controls-button').addEventListener('click', () => { preferences.controls = !preferences.controls; render(); });
-for (const [selector, property] of [['#controls-setting', 'controls'], ['#display-setting', 'display'], ['#motion-setting', 'motion'], ['#theme-setting', 'theme']]) {
+$('#controls-button').addEventListener('click', () => { preferences.controls = !preferences.controls; preferences.controlsChosen = true; render(); });
+for (const [selector, property] of [['#controls-setting', 'controls'], ['#display-setting', 'display'], ['#motion-setting', 'motion'], ['#theme-setting', 'theme'], ['#sound-setting', 'sound']]) {
   $(selector).addEventListener('change', event => {
     preferences[property] = ['theme', 'display'].includes(property) ? event.target.value : event.target.checked;
+    if (property === 'controls') preferences.controlsChosen = true;
     preferences.bits = preferences.display !== 'numbers';
     const clean = new URL(location.href);
     clean.searchParams.delete(property);
     if (property === 'display') clean.searchParams.delete('bits');
     history.replaceState(null, '', clean);
     render();
+    if (property === 'sound' && preferences.sound) playSound(3);
   });
 }
+$('#volume-setting').addEventListener('input', event => {
+  preferences.volume = Number(event.target.value) / 100;
+  const clean = new URL(location.href); clean.searchParams.delete('volume'); history.replaceState(null, '', clean);
+  render();
+});
+$('#volume-setting').addEventListener('change', () => playSound(3));
 $('#daily-button').addEventListener('click', () => {
   $('#new-form').elements.seed.value = `daily-${new Date().toISOString().slice(0, 10)}`;
   $('#new-form').elements.mode.value = 'classic';
@@ -297,7 +423,7 @@ document.addEventListener('keydown', event => {
   $('#board').classList.remove('pointer-focus');
   if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing || document.querySelector('dialog[open]') || event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
   const key = event.key.toLowerCase(), direction = { arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', w: 'up', a: 'left', s: 'down', d: 'right' }[key];
-  if (direction) { event.preventDefault(); performMove(direction); }
+  if (direction) { event.preventDefault(); void unlockAudio(); performMove(direction); }
   else if (['z', 'y', 'n', '?'].includes(key)) {
     event.preventDefault();
     if (event.repeat) return;
@@ -311,6 +437,7 @@ document.addEventListener('keydown', event => {
 let pointer = null;
 $('#board').addEventListener('pointerdown', event => {
   if (!event.isPrimary || event.button !== 0) return;
+  void unlockAudio();
   pointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
   event.currentTarget.classList.add('pointer-focus');
   event.currentTarget.setPointerCapture(event.pointerId);
@@ -325,7 +452,9 @@ $('#board').addEventListener('pointerup', event => {
 });
 $('#board').addEventListener('pointercancel', () => { pointer = null; });
 $('#board').addEventListener('lostpointercapture', () => { pointer = null; });
-document.addEventListener('visibilitychange', () => { if (document.hidden) persist(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
+window.addEventListener('pagehide', flushSave);
+document.addEventListener('pointerdown', () => { void unlockAudio(); }, { passive: true });
 
 const api = Object.freeze({
   version: 1, getState,

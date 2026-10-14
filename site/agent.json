@@ -10,7 +10,7 @@
   "modes": ["classic", "insane", "2048"],
   "methods": ["getState", "move", "newGame", "undo", "redo", "shareURL"],
   "webmcpTools": ["game2047_get_state", "game2047_move", "game2047_new_game", "game2047_undo", "game2047_redo"],
-  "urlParameters": ["seed", "mode", "size", "rows", "cols", "moves", "board", "score", "controls", "bits", "display", "theme", "motion", "save"],
+  "urlParameters": ["seed", "mode", "size", "rows", "cols", "moves", "board", "score", "controls", "bits", "display", "sound", "volume", "theme", "motion", "save"],
   "reproducibleExample": "./?seed=hello&mode=classic&size=4&save=0",
   "license": "PolyForm-Noncommercial-1.0.0"
 }

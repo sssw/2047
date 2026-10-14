@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>2047 performance check</title><style>body{font:14px system-ui;margin:24px}button{padding:12px}iframe{width:800px;height:700px;border:1px solid #ddd;max-width:100%}pre{white-space:pre-wrap}table{border-collapse:collapse;margin:12px 0}td,th{padding:5px 14px;text-align:left}iframe{height:min(680px,calc(100dvh - 190px))}progress{width:200px}</style><h1>2047 performance check</h1><p>Measures synchronous move processing and the next animation frame in a real browser. Results depend on the device and display.</p><button id="run">Run benchmark</button> <progress id="progress" max="400" value="0"></progress><table id="summary"><tr><th>Board</th><th>Save</th><th>Move P95</th><th>Frame P95</th></tr></table><details><summary>Raw measurements</summary><pre id="result">Ready.</pre></details><iframe title="Game under test" id="game"></iframe><script type="module">
+const frame=document.querySelector('#game'),result=document.querySelector('#result');
+const sleepFrame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+function percentile(values,p){const sorted=[...values].sort((a,b)=>a-b);return +sorted[Math.min(sorted.length-1,Math.floor(sorted.length*p))].toFixed(3)}
+const report=(values)=>({median:percentile(values,.5),p95:percentile(values,.95),max:percentile(values,1)});
+document.querySelector('#run').onclick=async()=>{
+ document.querySelector('#run').disabled=true;const results=[];let count=0;document.querySelector('#summary').innerHTML='<tr><th>Board</th><th>Save</th><th>Move P95</th><th>Frame P95</th></tr>';
+ for(const save of [false,true]){
+  await new Promise(resolve=>{frame.onload=resolve;frame.src=(new URLSearchParams(location.search).has('baseline')?'../baseline/':'../site/')+'?seed=performance-'+Date.now()+'&save='+(save?'1':'0')+'&motion=0&sound=0';});
+  const game=frame.contentWindow.game2047;
+  for(const size of [4,8]){
+   game.newGame({size,seed:'performance-2047',mode:'classic'});
+   const duration=[],nextFrame=[];
+   for(let n=0;n<100;n++){
+    if(!game.getState().legalMoves.length)game.newGame({size,seed:'performance-'+n,mode:'classic'});
+    await sleepFrame();
+    const directions=game.getState().legalMoves,dir=directions[(n*7+3)%directions.length];
+    const start=performance.now();game.move(dir);duration.push(performance.now()-start);
+    await sleepFrame();nextFrame.push(performance.now()-start);
+    document.querySelector('#progress').value=++count;
+   }
+   results.push({size,save,samples:duration.length,moveMs:report(duration),nextFrameMs:report(nextFrame)});
+   document.querySelector('#summary').insertAdjacentHTML('beforeend',`<tr><td>${size} × ${size}</td><td>${save?'On':'Off'}</td><td>${percentile(duration,.95)} ms</td><td>${percentile(nextFrame,.95)} ms</td></tr>`);result.textContent=JSON.stringify({complete:false,results},null,2);
+  }
+ }
+ result.textContent=JSON.stringify({complete:true,results},null,2);document.querySelector('#run').disabled=false;
+};
+</script></html>

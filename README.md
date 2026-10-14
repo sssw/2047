@@ -8,7 +8,7 @@ Play at [apps.prof.ws/2047](https://apps.prof.ws/2047/) or [GitHub Pages](https:
 - Swipe, arrow keys, WASD, and optional direction buttons.
 - Local saves, undo/redo, best scores, seeded challenges, and portable saved-game links.
 - Accessible DOM, documented JavaScript API, WebMCP tools, and URL configuration.
-- Responsive layouts, light/dark themes, and reduced motion.
+- Responsive layouts, light/dark themes, reduced motion, and adjustable sound effects.
 
 The engine matches the iOS binary merge rules and uses FNV-1a seed hashing with SplitMix64. Classic and Insane spawn 1; 2048 spawns 2. Each tile merges at most once per move. Only a move that changes the board spawns a tile.
 
@@ -21,6 +21,8 @@ Serve `site/` with any static HTTP server. No build step or package installation
 ```sh
 npm test
 ```
+
+To measure browser performance, serve the project root and open `tests/performance.html`. The benchmark measures synchronous move handling and the next animation frame, with local saves both on and off.
 
 Only `site/` is deployed. GitHub Actions validates the engine before publishing GitHub Pages on pushes to `main`. Assets use relative URLs and work under `/2047/` on both hosts. The shared domain receives the same static files under its `2047/` directory.
 
