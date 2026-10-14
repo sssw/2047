@@ -9,10 +9,10 @@ document.querySelector('#run').onclick=async()=>{
   await new Promise(resolve=>{frame.onload=resolve;frame.src=(new URLSearchParams(location.search).has('baseline')?'../baseline/':'../site/')+'?seed=performance-'+Date.now()+'&save='+(save?'1':'0')+'&motion=0&sound=0';});
   const game=frame.contentWindow.game2047;
   for(const size of [4,8]){
-   game.newGame({size,...(generation==='random'?{}:{seed:'performance-2047'}),mode:'classic'});
+   game.newGame({size,confirm:true,timeLimit:new URLSearchParams(location.search).has('timed')?120:0,...(generation==='random'?{}:{seed:'performance-2047'}),mode:'classic'});
    const duration=[],nextFrame=[];
    for(let n=0;n<100;n++){
-    if(!game.getState().legalMoves.length)game.newGame({size,...(generation==='random'?{}:{seed:'performance-'+n}),mode:'classic'});
+    if(!game.getState().legalMoves.length)game.newGame({size,confirm:true,timeLimit:new URLSearchParams(location.search).has('timed')?120:0,...(generation==='random'?{}:{seed:'performance-'+n}),mode:'classic'});
     await sleepFrame();
     const directions=game.getState().legalMoves,dir=directions[(n*7+3)%directions.length];
     const start=performance.now();game.move(dir);duration.push(performance.now()-start);

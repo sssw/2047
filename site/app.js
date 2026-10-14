@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-import { DIRECTIONS, MODES, newGame, move, legalMoves, validateState, encodeState, launchFromURL, legacySessionKey, hashSeed } from './engine.js?v=20261014-random2';
+import { DIRECTIONS, MODES, configuration, newGame, move, legalMoves, validateState, encodeState, launchFromURL, legacySessionKey, hashSeed } from './engine.js?v=20261014-random2';
 import { bitGlyph } from './glyph.js';
+import { DEFAULT_DURATION, MILESTONE, duration, createClock, createRound, recordRound, expireRound, remaining, assessment, formatTime, validateRound, encodeRound, decodeRound } from './assessment.js?v=20261014-timer1';
+import { celebrate, stopCelebration } from './celebration.js?v=20261014-timer1';
 
 const elements = new Map();
 const $ = selector => {
@@ -10,11 +12,14 @@ const $ = selector => {
 const STORE = '2047.sessions.v1', PREFS = '2047.preferences.v1', BEST = '2047.best.v1';
 const url = new URL(location.href);
 const saveEnabled = url.searchParams.get('save') !== '0';
-const defaults = { controls: false, bits: true, display: 'both', motion: false, theme: 'system', sound: true, volume: 0.35 };
+const defaults = { controls: false, bits: true, display: 'both', motion: false, theme: 'system', sound: true, volume: 0.35, timerDuration: DEFAULT_DURATION };
 let storageOK = true, past = [], future = [], state, sessionKey = 'default', sessions = {}, bestScores = {};
 let statusMessage = 'Make your first move.';
-const gameParameters = ['seed', 'mode', 'rows', 'cols', 'size', 'moves', 'board', 'score'];
+const gameParameters = ['seed', 'mode', 'rows', 'cols', 'size', 'moves', 'board', 'score', 'timer'];
 let previousSessionKey = null;
+let round = null, countdownTask = null;
+let resultDismissed = false, pendingGame = null;
+const clockNow = createClock();
 
 function readStorage(key, fallback) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
@@ -24,7 +29,7 @@ function readStorage(key, fallback) {
 function validPreferences(value) {
   if (!value || typeof value !== 'object') return { ...defaults };
   const display = ['both', 'bits', 'numbers'].includes(value.display) ? value.display : value.bits === false ? 'numbers' : 'both';
-  return { controls: value.controls === true && value.controlsChosen === true, controlsChosen: value.controlsChosen === true, bits: display !== 'numbers', display, motion: value.motion === true, theme: ['light', 'dark', 'system'].includes(value.theme) ? value.theme : 'system', sound: value.sound !== false, volume: Number.isFinite(value.volume) && value.volume >= 0 && value.volume <= 1 ? value.volume : .35 };
+  return { controls: value.controls === true && value.controlsChosen === true, controlsChosen: value.controlsChosen === true, bits: display !== 'numbers', display, motion: value.motion === true, theme: ['light', 'dark', 'system'].includes(value.theme) ? value.theme : 'system', sound: value.sound !== false, volume: Number.isFinite(value.volume) && value.volume >= 0 && value.volume <= 1 ? value.volume : .35, timerDuration: Number.isInteger(value.timerDuration) && value.timerDuration >= 1 && value.timerDuration <= 3600 ? value.timerDuration : DEFAULT_DURATION };
 }
 
 let preferences = validPreferences(readStorage(PREFS, defaults));
@@ -45,12 +50,19 @@ if (saveEnabled) {
 }
 
 try {
-  state = launchFromURL(url);
+  if (url.hash.startsWith('#round=')) {
+    const linked = decodeRound(url.hash.slice(7)); state = linked.game; round = linked.round;
+  } else {
+    if (url.searchParams.has('timer') && !/^\d{1,4}$/.test(url.searchParams.get('timer'))) throw new Error('Timer must be a whole number of seconds.');
+    const seconds = duration(Number(url.searchParams.get('timer') ?? 0));
+    state = launchFromURL(url) ?? (url.searchParams.has('timer') ? newGame() : null);
+    if (state) round = createRound(state, seconds, clockNow());
+  }
   if (state) {
-    const identity = url.hash.startsWith('#state=') ? encodeState(state)
+    const identity = url.hash.startsWith('#round=') ? encodeRound(state, round) : url.hash.startsWith('#state=') ? encodeState(state)
       : JSON.stringify(gameParameters.filter(key => url.searchParams.has(key)).map(key => [key, url.searchParams.get(key)]));
     sessionKey = 'link2-' + hashSeed(identity).toString(16);
-    if (saveEnabled && !sessions[sessionKey]) {
+    if (saveEnabled && !sessions[sessionKey] && !url.searchParams.has('timer') && !url.hash.startsWith('#round=')) {
       // Snapshot saves used an earlier key even after version 1.
       const snapshotKey = 'link-' + hashSeed(encodeState(state)).toString(16);
       if (sessions[snapshotKey]) previousSessionKey = snapshotKey;
@@ -66,15 +78,17 @@ if (saveEnabled && (sessions[sessionKey] || sessions[previousSessionKey])) {
     const restored = validateState(saved.state);
     const previous = (Array.isArray(saved.past) ? saved.past : []).slice(-100).map(validateState);
     const next = (Array.isArray(saved.future) ? saved.future : []).slice(-100).map(validateState);
+    const restoredRound = validateRound(saved.round, restored);
     if ([...previous, ...next].some(s => s.rows !== restored.rows || s.columns !== restored.columns || s.mode !== restored.mode || s.seed !== restored.seed || s.randomness !== restored.randomness)) throw new Error('Incompatible history.');
-    state = restored; past = previous; future = next;
+    state = restored; past = previous; future = next; round = restoredRound;
     if (!statusMessage.includes('unchanged')) statusMessage = 'Welcome back. Your game is right here.';
   } catch { statusMessage = 'This saved game could not be read. A fresh board is ready.'; }
 }
 state ??= newGame();
+round ??= createRound(state);
 
 const bestKey = () => `${state.mode}:${state.rows}x${state.columns}`;
-let saveTask = null, saveDirty = false, queuedState = null, queuedHistory = '', savedPreferences = '', savedBest = '';
+let saveTask = null, saveDirty = false, queuedState = null, queuedRound = null, queuedHistory = '', savedPreferences = '', savedBest = '';
 function flushSave() {
   if (saveTask) {
     if (saveTask.idle) cancelIdleCallback(saveTask.id);
@@ -84,7 +98,7 @@ function flushSave() {
   if (!saveEnabled || !saveDirty) return;
   saveDirty = false;
   try {
-    sessions[sessionKey] = { state, past, future, updated: Date.now() };
+    sessions[sessionKey] = { state, past, future, round, updated: Date.now() };
     const keys = Object.keys(sessions).sort((a, b) => (sessions[b]?.updated || 0) - (sessions[a]?.updated || 0));
     for (const key of keys.slice(8)) if (key !== sessionKey) delete sessions[key];
     localStorage.setItem(STORE, JSON.stringify(sessions));
@@ -101,8 +115,8 @@ function persist() {
   bestScores[bestKey()] = Math.max(bestScores[bestKey()] || 0, state.score);
   if (!saveEnabled) return;
   const signature = `${past.length}:${future.length}:${JSON.stringify(preferences)}`;
-  if (queuedState === state && queuedHistory === signature) return;
-  queuedState = state; queuedHistory = signature; saveDirty = true;
+  if (queuedState === state && queuedRound === round && queuedHistory === signature) return;
+  queuedState = state; queuedRound = round; queuedHistory = signature; saveDirty = true;
   if (!saveTask) {
     saveTask = typeof requestIdleCallback === 'function'
       ? { idle: true, id: requestIdleCallback(flushSave, { timeout: 200 }) }
@@ -111,10 +125,59 @@ function persist() {
 }
 
 let legalState = null, cachedMoves = [];
-function getState() {
+function snapshotState(now = round.durationSeconds ? clockNow() : 0) {
   if (legalState !== state) { cachedMoves = legalMoves(state); legalState = state; }
   const available = cachedMoves;
-  return structuredClone({ ...state, highestTile: Math.max(...state.grid), target: state.mode === '2048' ? 2048 : 2047, won: Math.max(...state.grid) >= (state.mode === '2048' ? 2048 : 2047), gameOver: available.length === 0, legalMoves: available, canUndo: past.length > 0, canRedo: future.length > 0, bestScore: Math.max(bestScores[bestKey()] || 0, state.score), persistence: saveEnabled && storageOK ? 'local' : 'session-only', preferences });
+  return structuredClone({ ...state, highestTile: Math.max(...state.grid), peakTile: round.maxTile, milestoneReached: round.celebrated,
+    target: state.mode === '2048' ? 2048 : 2047, won: Math.max(...state.grid) >= (state.mode === '2048' ? 2048 : 2047),
+    gameOver: round.expired || available.length === 0, gameOverReason: round.expired ? 'timeout' : available.length ? null : 'no-moves',
+    inputLocked: round.expired, assessment: assessment(round, state, now),
+    legalMoves: round.expired ? [] : available, canUndo: !round.expired && past.length > 0, canRedo: !round.expired && future.length > 0,
+    bestScore: Math.max(bestScores[bestKey()] || 0, state.score), persistence: saveEnabled && storageOK ? 'local' : 'session-only', preferences });
+}
+
+function refreshDeadline(now) {
+  if (!round.durationSeconds || round.expired) return false;
+  const next = expireRound(round, now ?? clockNow());
+  if (next === round) return false;
+  round = next;
+  statusMessage = `Time’s up · Max tile ${numberFormat.format(round.maxTile)} · Score ${numberFormat.format(state.score)}`;
+  return true;
+}
+
+function getState() {
+  const now = round.durationSeconds ? clockNow() : 0;
+  if (refreshDeadline(now)) render();
+  return snapshotState(now);
+}
+
+function paintTimer(snapshot) {
+  const timed = snapshot.assessment, button = $('#timer-button');
+  $('#timer-display').textContent = timed.enabled ? formatTime(timed.remainingMs) : 'Off';
+  $('#timer-label').textContent = timed.status === 'finished' ? 'TIME UP' : 'TIMER';
+  button.dataset.status = timed.status;
+  button.dataset.urgent = timed.status === 'running' && timed.remainingMs <= 10000;
+  button.setAttribute('aria-label', timed.status === 'finished' ? 'Time is up. View result or start a timed round.' : timed.enabled ? `Countdown ${formatTime(timed.remainingMs)} remaining. Timer settings.` : 'Countdown off. Set a time limit.');
+  button.title = timed.enabled ? 'Time keeps running while settings are open.' : 'Optional timed round · default 2 minutes';
+}
+
+function scheduleCountdown() {
+  clearTimeout(countdownTask); countdownTask = null;
+  if (!round.durationSeconds || round.expired || document.hidden) return;
+  const ms = remaining(round, clockNow());
+  countdownTask = setTimeout(() => {
+    if (refreshDeadline()) { render(); return; }
+    const snapshot = snapshotState();
+    paintTimer(snapshot);
+    $('#game-state').textContent = JSON.stringify(snapshot);
+    window.dispatchEvent(new CustomEvent('game2047:timer', { detail: snapshot.assessment }));
+    scheduleCountdown();
+  }, Math.max(1, Math.min(ms, ms % 1000 || 1000)));
+}
+
+function roundLocked() {
+  if (refreshDeadline()) render();
+  return round.expired;
 }
 
 let appliedPreferences = '';
@@ -125,6 +188,7 @@ function applyPreferences() {
   if (preferences.theme === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = preferences.theme;
   document.documentElement.classList.toggle('reduce-motion', preferences.motion);
+  if (preferences.motion) stopCelebration($('#celebration'));
   $('#direction-pad').hidden = !preferences.controls;
   $('.direction-section').hidden = !preferences.controls;
   $('#controls-button').innerHTML = `${preferences.controls ? 'Hide' : 'Show'} controls <span aria-hidden="true">${preferences.controls ? '−' : '+'}</span>`;
@@ -203,13 +267,19 @@ function glyphElement(value) {
 }
 
 function render(effect = {}) {
+  refreshDeadline();
   persist();
-  const snapshot = getState(), board = $('#board');
+  const snapshot = snapshotState(), board = $('#board');
   const preferencesChanged = applyPreferences();
   $('#score').textContent = numberFormat.format(state.score);
   $('#best').textContent = numberFormat.format(snapshot.bestScore);
   $('#moves').textContent = numberFormat.format(state.moves);
+  for (const selector of ['#score', '#best']) {
+    const element = $(selector); element.title = element.textContent;
+  }
+  paintTimer(snapshot);
   $('#mode-pill').textContent = state.mode.toUpperCase();
+  $('#mode-pill').setAttribute('aria-label', `${state.mode} mode. Open new game settings.`);
   $('#mode-label').textContent = state.mode === 'classic' ? 'THE BINARY PUZZLE' : `${state.mode.toUpperCase()} MODE`;
   $('#target-label').textContent = snapshot.target;
   $('#session-label').textContent = `${state.rows} × ${state.columns} · ${state.randomness === 'random' ? 'Random' : state.seed}`;
@@ -217,11 +287,13 @@ function render(effect = {}) {
   $('#randomness-status').textContent = state.randomness === 'random' ? 'Random · fresh tiles each move' : `Seeded · ${state.seed}`;
   $('#save-label').textContent = saveEnabled && storageOK ? (saveDirty ? 'Autosave on' : 'Saved locally') : 'Session only';
   $('#save-label').title = saveEnabled && storageOK ? 'Saved in this browser' : 'Use Share to keep this game. Local saving is disabled or unavailable.';
-  $('#undo-button').disabled = !past.length;
-  $('#redo-button').disabled = !future.length;
+  $('#undo-button').disabled = !snapshot.canUndo;
+  $('#redo-button').disabled = !snapshot.canRedo;
   document.querySelectorAll('[data-direction]').forEach(button => { button.disabled = !snapshot.legalMoves.includes(button.dataset.direction); });
-  $('#end-banner').hidden = !snapshot.gameOver;
-  $('#status').textContent = snapshot.gameOver ? 'No moves left. Undo or start a new game.' : statusMessage;
+  $('#end-banner').hidden = !snapshot.gameOver || round.durationSeconds > 0;
+  $('#status').textContent = round.expired ? `Time’s up · Max tile ${numberFormat.format(round.maxTile)} · Score ${numberFormat.format(state.score)}` : snapshot.gameOver ? 'No moves left. Undo or start a new game.' : statusMessage;
+  $('#status').title = $('#status').textContent;
+  board.setAttribute('aria-disabled', String(snapshot.inputLocked));
   board.dataset.mode = state.mode;
   board.dataset.score = state.score;
   board.dataset.moves = state.moves;
@@ -278,8 +350,10 @@ function render(effect = {}) {
   });
   renderedDisplay = preferences.display;
   if (shapeChanged || preferencesChanged) fitBoard();
+  paintResult(snapshot);
   $('#game-state').textContent = JSON.stringify(snapshot);
   window.dispatchEvent(new CustomEvent('game2047:change', { detail: snapshot }));
+  scheduleCountdown();
   return snapshot;
 }
 
@@ -287,10 +361,11 @@ function fitBoard() {
   const sideBySide = matchMedia('(orientation:landscape) and (min-width:480px)').matches;
   const intro = $('.intro'), playArea = $('.play-area');
   const scorebar = $('.scorebar'), tools = $('.game-tools'), status = $('.status');
+  const roundTools = $('.round-tools');
   if (sideBySide && scorebar.parentElement !== intro) {
-    intro.append(scorebar, status); $('.intro-heading').append(tools);
+    intro.append(scorebar, status, roundTools); $('.intro-heading').append(tools);
   } else if (!sideBySide && scorebar.parentElement !== playArea) {
-    playArea.prepend(scorebar); scorebar.append(tools); playArea.append(status);
+    playArea.prepend(scorebar); scorebar.append(tools); playArea.append(status); $('.intro-heading').append(roundTools);
   }
   const shell = $('.app-shell'), layout = $('.game-layout'), board = $('#board');
   const shellStyle = getComputedStyle(shell), layoutStyle = getComputedStyle(layout);
@@ -309,6 +384,7 @@ function fitBoard() {
   const width = Math.min(playArea.clientWidth, availableHeight * state.columns / state.rows);
   board.parentElement.style.width = `${Math.floor(width * 100) / 100}px`;
   board.dataset.compact = width / state.columns < 42;
+  positionResult();
 }
 let fitFrame = 0;
 function scheduleFit() {
@@ -320,37 +396,70 @@ window.visualViewport?.addEventListener('resize', scheduleFit);
 window.addEventListener('pageshow', scheduleFit);
 
 function performMove(direction) {
+  if (roundLocked()) return { changed: false, gain: 0, reason: 'timeout', state: snapshotState() };
   const previous = state, result = move(state, direction);
+  // Check again before committing: a slow caller cannot finish a move after time is up.
+  if (roundLocked()) return { changed: false, gain: 0, reason: 'timeout', state: snapshotState() };
+  let milestone = false;
   if (result.changed) {
     past.push(previous); if (past.length > 100) past.shift(); future = [];
     state = result.state;
-    const target = state.mode === '2048' ? 2048 : 2047;
-    statusMessage = Math.max(...previous.grid) < target && Math.max(...state.grid) >= target ? `${target} reached. Beautifully done — keep going!` : result.gain ? `+${result.gain} · Keep the bits moving.` : 'A little more room.';
-    playSound(result.gain, Math.max(...previous.grid) < target && Math.max(...state.grid) >= target);
+    const recorded = recordRound(round, state, 'move'); round = recorded.round; milestone = recorded.milestone;
+    statusMessage = milestone ? `${Math.max(...state.grid)} reached. Keep going!` : result.gain ? `+${result.gain} · Keep the bits moving.` : 'A little more room.';
+    playSound(result.gain, milestone);
   } else statusMessage = `No move ${direction}. Try another direction.`;
-  return { changed: result.changed, gain: result.gain, state: render(result) };
+  const snapshot = render(result);
+  if (milestone) celebrateMilestone();
+  return { changed: result.changed, gain: result.gain, state: snapshot };
+}
+
+function celebrateMilestone() {
+  celebrate($('#celebration'), preferences.motion || reducedMotion.matches);
+  window.dispatchEvent(new CustomEvent('game2047:milestone', { detail: { target: MILESTONE, maxTile: round.maxTile } }));
 }
 
 function undo() {
+  if (roundLocked()) return { changed: false, reason: 'timeout', state: snapshotState() };
   if (!past.length) return { changed: false, state: getState() };
   future.push(state); state = past.pop(); statusMessage = 'One step back. A new possibility.';
+  round = recordRound(round, state, 'undo').round;
   return { changed: true, state: render() };
 }
 function redo() {
+  if (roundLocked()) return { changed: false, reason: 'timeout', state: snapshotState() };
   if (!future.length) return { changed: false, state: getState() };
   past.push(state); state = future.pop(); statusMessage = 'Move restored.';
-  return { changed: true, state: render() };
+  const recorded = recordRound(round, state, 'redo'); round = recorded.round;
+  const snapshot = render();
+  if (recorded.milestone) celebrateMilestone();
+  return { changed: true, state: snapshot };
 }
 
 function startGame(config = {}) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('Invalid game configuration.');
-  const next = newGame({ ...config, seed: typeof config.seed === 'string' && !config.seed.trim() ? null : config.seed });
+  if (config.confirm !== undefined && typeof config.confirm !== 'boolean') throw new Error('Confirmation must be true or false.');
+  const seconds = duration(config.timeLimit ?? 0);
+  const chosen = { ...configuration({ ...config, seed: typeof config.seed === 'string' && !config.seed.trim() ? null : config.seed }), timeLimit: seconds };
+  if (state.score !== 0 && config.confirm !== true) {
+    pendingGame = chosen;
+    $('#confirm-message').textContent = `Your current score is ${numberFormat.format(state.score)}. Starting a new ${chosen.mode === '2048' ? '2048' : chosen.mode === 'classic' ? 'Classic' : 'Insane'} round replaces this game.`;
+    showDialog('#confirm-dialog');
+    return { needsConfirmation: true, state: getState() };
+  }
+  return commitNewGame(chosen);
+}
+
+function commitNewGame(chosen) {
+  const next = newGame(chosen), seconds = chosen.timeLimit;
+  stopCelebration($('#celebration'));
   state = next; past = []; future = []; sessionKey = 'default';
+  round = createRound(state, seconds, clockNow());
+  resultDismissed = false; pendingGame = null;
   const clean = new URL(location.href);
   for (const key of gameParameters) clean.searchParams.delete(key);
   clean.hash = '';
   history.replaceState(null, '', clean);
-  statusMessage = 'A fresh board. Make your first move.';
+  statusMessage = seconds ? 'Clock running. Make every move count.' : 'A fresh board. Make your first move.';
   return render();
 }
 
@@ -363,12 +472,15 @@ function openNew() {
   form.elements.mode.value = state.mode;
   form.elements.rows.value = state.rows;
   form.elements.columns.value = state.columns;
-  form.elements.seed.value = '';
+  form.elements.seed.value = state.seed ?? '';
+  form.elements.timeLimit.replaceChildren(...[...new Set([0, 60, 120, 300, preferences.timerDuration, round.durationSeconds])].sort((a, b) => a - b).map(seconds => new Option(seconds ? formatTime(seconds * 1000) : 'Off', seconds)));
+  form.elements.timeLimit.value = round.durationSeconds;
   $('#new-error').textContent = '';
   showDialog('#new-dialog');
 }
 
 function shareURL(challenge = false) {
+  if (refreshDeadline()) render();
   const link = new URL(location.href);
   link.search = ''; link.hash = '';
   if (challenge) {
@@ -377,12 +489,15 @@ function shareURL(challenge = false) {
     link.searchParams.set('mode', state.mode);
     link.searchParams.set('rows', state.rows);
     link.searchParams.set('cols', state.columns);
-  } else link.hash = 'state=' + encodeState(state);
+    if (round.durationSeconds) link.searchParams.set('timer', round.durationSeconds);
+  } else link.hash = round.durationSeconds ? 'round=' + encodeRound(state, round) : 'state=' + encodeState(state);
   return link.href;
 }
 function openShare(challenge = false) {
   $('#share-url').value = shareURL(challenge);
   $('#share-description').textContent = challenge ? 'Same seed and settings. A fresh board for a friend.'
+    : round.expired ? 'This link includes your finished round, board, and result.'
+    : round.durationSeconds ? 'This link keeps your board and the original countdown deadline.'
     : state.randomness === 'seeded' ? 'This link keeps your board, score, and repeatable continuation.'
     : 'This link keeps your board and score. Future tiles are freshly randomized.';
   $('#share-feedback').textContent = '';
@@ -390,12 +505,118 @@ function openShare(challenge = false) {
   showDialog('#share-dialog');
 }
 
+function paintResult(snapshot) {
+  const result = snapshot.assessment.result, notice = $('#round-notice');
+  notice.hidden = !result || resultDismissed;
+  if (!result) { positionResult(); return; }
+  for (const [selector, value] of [['#result-max', result.maxTile], ['#result-score', result.score]]) {
+    $(selector).textContent = numberFormat.format(value);
+    $(selector).style.setProperty('--digits', $(selector).textContent.length);
+  }
+  positionResult();
+}
+
+function positionResult() {
+  const notice = $('#round-notice');
+  const introElement = $('.intro'), playElement = $('.play-area');
+  if (introElement.style.transform) introElement.style.transform = '';
+  if (playElement.style.transform) playElement.style.transform = '';
+  if (notice.hidden) return;
+  let board = $('#board').getBoundingClientRect(), anchor = $('#timer-button').getBoundingClientRect();
+  const shell = $('.app-shell').getBoundingClientRect(), style = getComputedStyle($('.app-shell'));
+  const left = shell.left + parseFloat(style.paddingLeft), right = shell.right - parseFloat(style.paddingRight);
+  const top = parseFloat(style.paddingTop), bottom = innerHeight - parseFloat(style.paddingBottom);
+  // Place in the side rail or header, never across the board.
+  const side = matchMedia('(orientation:landscape) and (min-width:480px)').matches;
+  const preferredWidth = !side && innerWidth <= 420 ? 212 : 280;
+  notice.style.width = `${Math.min(preferredWidth, (side ? board.left - 12 : right) - left)}px`;
+  const size = notice.getBoundingClientRect();
+  let intro = introElement.getBoundingClientRect(), play = playElement.getBoundingClientRect();
+  // Use spare space before covering any controls. Only translate; never resize the board.
+  if (side && intro.height + size.height + 10 <= bottom - top) {
+    const shift = top + (bottom - top - intro.height - size.height - 10) / 2 - intro.top;
+    introElement.style.transform = `translateY(${shift}px)`;
+  } else if (!side) {
+    const shift = Math.max(0, top + size.height + 6 - intro.top);
+    if (shift && play.bottom + shift <= bottom) {
+      introElement.style.transform = `translateY(${shift}px)`;
+      playElement.style.transform = `translateY(${shift}px)`;
+    }
+  }
+  intro = introElement.getBoundingClientRect(); play = playElement.getBoundingClientRect();
+  board = $('#board').getBoundingClientRect(); anchor = $('#timer-button').getBoundingClientRect();
+  const region = side ? { left, right: board.left - 12, top, bottom }
+    : { left, right, top, bottom: board.top - 8 };
+  const freeRegions = side
+    ? [{ ...region, top: intro.bottom + 10 }, { ...region, bottom: intro.top - 10 }]
+    : [{ left, right, top, bottom: intro.top - 6 }, { left, right, top: play.bottom + 6, bottom }];
+  const available = freeRegions.filter(area => area.bottom - area.top >= size.height - .1);
+  available.sort((a, b) => Math.abs(a.top - anchor.bottom) - Math.abs(b.top - anchor.bottom));
+  const placement = available[0] ?? region;
+  const x = Math.max(placement.left, Math.min(anchor.left, placement.right - size.width));
+  const y = Math.max(placement.top, Math.min(anchor.bottom + 6, placement.bottom - size.height));
+  notice.style.left = `${x}px`; notice.style.top = `${y}px`;
+}
+
+function openTimer() {
+  const current = getState(), seconds = round.durationSeconds || preferences.timerDuration;
+  $('#timer-form').elements.minutes.value = Math.floor(seconds / 60);
+  $('#timer-form').elements.seconds.value = seconds % 60;
+  $('#timer-error').textContent = '';
+  $('#timer-result').hidden = !current.assessment.result;
+  $('#timer-result-text').textContent = current.assessment.result
+    ? `Max tile ${numberFormat.format(round.maxTile)} · Score ${numberFormat.format(state.score)} · ${round.movesMade} moves` : '';
+  $('#untimed-button').textContent = round.durationSeconds ? 'Start an untimed round' : 'Keep timer off';
+  showDialog('#timer-dialog');
+}
+
+function selectedDuration() {
+  const form = $('#timer-form'), minutes = Number(form.elements.minutes.value), seconds = Number(form.elements.seconds.value);
+  if (!Number.isInteger(minutes) || !Number.isInteger(seconds) || minutes < 0 || minutes > 60 || seconds < 0 || seconds > 59) throw new Error('Enter whole minutes and seconds.');
+  const total = duration(minutes * 60 + seconds);
+  if (!total) throw new Error('Choose at least 1 second.');
+  return total;
+}
+
+function finishNewGameRequest(result) {
+  if (result.needsConfirmation) return;
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  $('#board').focus({ preventScroll: true });
+}
+
+$('#timer-button').addEventListener('click', openTimer);
+$('#dismiss-result').addEventListener('click', () => { resultDismissed = true; $('#round-notice').hidden = true; positionResult(); $('#timer-button').focus({ preventScroll: true }); });
+document.querySelectorAll('[data-duration]').forEach(button => button.addEventListener('click', () => {
+  $('#timer-form').elements.minutes.value = Number(button.dataset.duration) / 60;
+  $('#timer-form').elements.seconds.value = 0;
+}));
+$('#timer-form').addEventListener('submit', event => {
+  event.preventDefault();
+  try {
+    const seconds = selectedDuration(); preferences.timerDuration = seconds;
+    finishNewGameRequest(startGame({ mode: state.mode, rows: state.rows, columns: state.columns, seed: state.seed, timeLimit: seconds }));
+  } catch (error) { $('#timer-error').textContent = error.message; }
+});
+$('#untimed-button').addEventListener('click', () => {
+  if (!round.durationSeconds) {
+    try { preferences.timerDuration = selectedDuration(); } catch { /* Keep the previous preset. */ }
+    $('#timer-dialog').close(); persist(); return;
+  }
+  finishNewGameRequest(startGame({ mode: state.mode, rows: state.rows, columns: state.columns, seed: state.seed, timeLimit: 0 }));
+});
+$('#confirm-start').addEventListener('click', () => {
+  if (pendingGame) finishNewGameRequest(commitNewGame(pendingGame));
+});
+$('#confirm-cancel').addEventListener('click', () => { pendingGame = null; $('#confirm-dialog').close(); });
+$('#confirm-dialog').addEventListener('cancel', () => { pendingGame = null; });
+
 $('#help-button').addEventListener('click', () => showDialog('#help-dialog'));
 $('#settings-button').addEventListener('click', () => showDialog('#settings-dialog'));
 $('#about-button').addEventListener('click', () => showDialog('#about-dialog'));
 $('#title-button').addEventListener('click', () => showDialog('#about-dialog'));
 $('#settings-about').addEventListener('click', () => showDialog('#about-dialog'));
 $('#new-button').addEventListener('click', openNew);
+$('#mode-pill').addEventListener('click', openNew);
 $('#again-button').addEventListener('click', openNew);
 $('#undo-button').addEventListener('click', undo);
 $('#redo-button').addEventListener('click', redo);
@@ -437,8 +658,7 @@ $('#new-form').addEventListener('submit', event => {
   event.preventDefault();
   const form = event.currentTarget;
   try {
-    startGame({ mode: form.elements.mode.value, rows: Number(form.elements.rows.value), columns: Number(form.elements.columns.value), seed: form.elements.seed.value });
-    $('#new-dialog').close(); $('#board').focus({ preventScroll: true });
+    finishNewGameRequest(startGame({ mode: form.elements.mode.value, rows: Number(form.elements.rows.value), columns: Number(form.elements.columns.value), seed: form.elements.seed.value, timeLimit: Number(form.elements.timeLimit.value) }));
   } catch (error) { $('#new-error').textContent = error.message; }
 });
 
@@ -475,17 +695,23 @@ $('#board').addEventListener('pointerup', event => {
 });
 $('#board').addEventListener('pointercancel', () => { pointer = null; });
 $('#board').addEventListener('lostpointercapture', () => { pointer = null; });
-document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
-window.addEventListener('pagehide', flushSave);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { clearTimeout(countdownTask); flushSave(); stopCelebration($('#celebration')); }
+  else { if (refreshDeadline()) render(); else { paintTimer(snapshotState()); scheduleCountdown(); } }
+});
+window.addEventListener('pageshow', () => { if (refreshDeadline()) render(); else scheduleCountdown(); });
+window.addEventListener('pagehide', () => { refreshDeadline(); persist(); flushSave(); clearTimeout(countdownTask); stopCelebration($('#celebration')); });
+reducedMotion.addEventListener('change', event => { if (event.matches) stopCelebration($('#celebration')); });
 document.addEventListener('pointerdown', () => { void unlockAudio(); }, { passive: true });
 
 const api = Object.freeze({
-  version: 1, getState,
+  version: 3, getState,
   move(direction) {
+    if (roundLocked()) return { changed: false, gain: 0, reason: 'timeout', state: snapshotState() };
     if (document.querySelector('dialog[open]')) throw new Error('Close the open dialog before moving.');
     return performMove(direction);
   },
-  newGame: startGame, undo, redo,
+  newGame(config) { const result = startGame(config); if (!result.needsConfirmation) document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); return result; }, undo, redo,
   shareURL(options = {}) { return shareURL(options.challenge === true); }
 });
 Object.defineProperty(window, 'game2047', { value: api, writable: false, configurable: false });
@@ -496,7 +722,7 @@ if (typeof registry?.registerTool === 'function') {
   const definitions = [
     { name: 'game2047_get_state', description: 'Read the 2047 board, score, legal moves, and undo availability.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: () => api.getState() },
     { name: 'game2047_move', description: 'Slide the 2047 board one step. Returns the updated board after any merge and spawn.', inputSchema: { type: 'object', properties: { direction: { type: 'string', enum: DIRECTIONS } }, required: ['direction'], additionalProperties: false }, execute: input => api.move(input?.direction) },
-    { name: 'game2047_new_game', description: 'Replace the current 2047 session with a new game. Existing progress in this session is replaced.', inputSchema: { type: 'object', properties: { seed: { type: 'string', maxLength: 128 }, mode: { type: 'string', enum: MODES }, rows: { type: 'integer', minimum: 2, maximum: 8 }, columns: { type: 'integer', minimum: 2, maximum: 8 } }, additionalProperties: false }, execute: input => api.newGame(input) },
+    { name: 'game2047_new_game', description: 'Start a new round, optionally timed. Nonzero scores require explicit confirmation; pass confirm true to confirm replacement.', inputSchema: { type: 'object', properties: { seed: { type: 'string', maxLength: 128 }, mode: { type: 'string', enum: MODES }, rows: { type: 'integer', minimum: 2, maximum: 8 }, columns: { type: 'integer', minimum: 2, maximum: 8 }, timeLimit: { type: 'integer', minimum: 0, maximum: 3600 }, confirm: { type: 'boolean' } }, additionalProperties: false }, execute: input => api.newGame(input) },
     { name: 'game2047_undo', description: 'Undo one move in the current 2047 game.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute: () => api.undo() },
     { name: 'game2047_redo', description: 'Restore one previously undone 2047 move.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute: () => api.redo() }
   ];

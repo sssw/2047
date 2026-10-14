@@ -1,0 +1,74 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>2047 assessment checks</title>
+<style>body{font:14px system-ui;margin:20px}button{padding:12px}pre{white-space:pre-wrap}iframe{width:390px;height:640px;border:0;max-width:100%}</style>
+<h1>2047 assessment checks</h1><p>Uses an isolated test session and restores existing 2047 storage afterward.</p><button id="run">Run checks</button><pre id="result">Ready.</pre><iframe id="game" title="Game under test"></iframe>
+<script type="module">
+const frame=document.querySelector('#game'),output=document.querySelector('#result');
+const keys=['2047.sessions.v1','2047.preferences.v1','2047.best.v1'];
+const reset=()=>keys.forEach(key=>localStorage.removeItem(key));
+const load=query=>new Promise(resolve=>{frame.onload=()=>resolve(frame.contentWindow.game2047);frame.src='../site/'+query});
+const unload=()=>new Promise(resolve=>{frame.onload=resolve;frame.src='about:blank'});
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const position=game=>{const {grid,score,moves,rng}=game.getState();return {grid,score,moves,rng}};
+document.querySelector('#run').onclick=async()=>{
+ const backup=Object.fromEntries(keys.map(key=>[key,localStorage.getItem(key)])),checks=[],timings=[];
+ let error=null;
+ const check=(condition,name)=>{if(!condition)throw new Error(name);checks.push(name);output.textContent=JSON.stringify({complete:false,checks},null,2)};
+ document.querySelector('#run').disabled=true;
+ try{
+  reset();let game=await load('?save=0&sound=0');
+  check(!game.getState().assessment.enabled,'Countdown is off by default');
+  const boardBefore=frame.contentDocument.querySelector('#board').getBoundingClientRect();
+  game.newGame({seed:'timer',timeLimit:120,confirm:true});
+  const boardAfter=frame.contentDocument.querySelector('#board').getBoundingClientRect();
+  check(boardBefore.width===boardAfter.width&&boardBefore.height===boardAfter.height,'Enabling a timer preserves board size');
+  check(frame.contentDocument.querySelector('#best').previousElementSibling.textContent==='BEST'&&frame.contentDocument.querySelector('#moves').previousElementSibling.textContent==='MOVES','All original score statistics remain');
+  const deadline=game.getState().assessment.deadline;
+  game.move(game.getState().legalMoves[0]);game.undo();game.redo();
+  check(game.getState().assessment.deadline===deadline,'Undo and redo never reset the timer');
+
+  await unload();reset();
+  const url='?seed=timeout&size=2&board=1,2,0,0&timer=2&sound=0';
+  game=await load(url);game.move('left');const before=position(game),first=game.getState();
+  await unload();await sleep(150);game=await load(url);
+  check(game.getState().assessment.deadline===first.assessment.deadline,'Reload keeps the original deadline');
+  await sleep(game.getState().assessment.remainingMs+60);
+  const ended=game.getState();
+  check(ended.inputLocked&&ended.assessment.status==='finished'&&ended.assessment.remainingMs===0,'Countdown expires and locks input');
+  check(equal(position(game),before),'Expiry does not change the board or score');
+  check(ended.assessment.result.maxTile===3&&ended.assessment.result.score===3,'Result reports this round’s maximum tile and score');
+  for(const action of [()=>game.move('right'),()=>game.undo(),()=>game.redo()])check(action().changed===false,'Post-deadline action is rejected');
+  check(equal(position(game),before)&&!game.getState().canUndo&&!game.getState().legalMoves.length,'All action surfaces remain frozen');
+  const doc=frame.contentDocument,b=doc.querySelector('#board').getBoundingClientRect(),n=doc.querySelector('#round-notice').getBoundingClientRect();
+  check(!doc.querySelector('#round-notice').hidden&&(n.bottom<=b.top||n.right<=b.left||n.left>=b.right||n.top>=b.bottom),'Results are outside the board');
+  check(doc.querySelector('#end-banner').hidden,'No end-of-round overlay covers the board');
+  const shared=new URL(game.shareURL());shared.search='?save=0&timer=0&sound=0';
+  await unload();game=await load(shared.search+shared.hash);
+  check(game.getState().inputLocked&&equal(game.getState().assessment.result,ended.assessment.result),'Shared results keep the deadline and cannot be unlocked by URL options');
+
+  const old=position(game), request=game.newGame({mode:'insane'});
+  check(request.needsConfirmation&&equal(position(game),old)&&frame.contentDocument.querySelector('#confirm-dialog').open,'Nonzero-score resets require confirmation before changing anything');
+  const fresh=game.newGame({mode:'insane',confirm:true});
+  check(fresh.mode==='insane'&&fresh.score===0&&!frame.contentDocument.querySelector('dialog[open]'),'Explicit confirmation starts the selected mode');
+  check(!game.newGame({mode:'classic'}).needsConfirmation,'A zero-score reset needs no confirmation');
+
+  await unload();reset();
+  for(const mode of ['classic','insane','2048']){
+   const tiles=mode==='2048'?[1024,1024]:[1023,1024];
+   game=await load('?seed=confetti&save=0&sound=0&mode='+mode+'&board='+[...tiles,...Array(14).fill(0)].join(','));
+   let events=0;frame.contentWindow.addEventListener('game2047:milestone',()=>events++);
+   game.move('left');const achieved=game.getState();
+   const reduced=achieved.preferences.motion||frame.contentWindow.matchMedia('(prefers-reduced-motion:reduce)').matches;
+   check(events===1&&achieved.milestoneReached&&achieved.peakTile>=2047,mode+' celebrates the milestone');
+   check(frame.contentDocument.querySelector('#celebration').children.length===(reduced?0:32),mode+' uses a bounded celebration');
+   game.undo();game.redo();check(events===1,mode+' does not repeat confetti after undo/redo');
+   const choices=game.getState().legalMoves,t=performance.now(),moved=game.move(choices[0]);timings.push(performance.now()-t);
+   check(moved.changed,mode+' remains playable during celebration');
+   const copy=game.getState();copy.assessment.durationSeconds=999;copy.grid[0]=0;
+   check(game.getState().assessment.durationSeconds!==999,'Returned assessment state is a copy');
+  }
+  await sleep(2000);check(frame.contentDocument.querySelector('#celebration').children.length===0,'Confetti cleans itself up');
+ }catch(e){error=e.message}
+ finally{await unload();reset();for(const key of keys)if(backup[key]!==null)localStorage.setItem(key,backup[key]);output.textContent=JSON.stringify({complete:true,passed:checks.length,error,checks,moveDuringConfettiMs:timings},null,2);document.querySelector('#run').disabled=false}
+};
+</script></html>

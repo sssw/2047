@@ -9,6 +9,7 @@ Play at [apps.prof.ws/2047](https://apps.prof.ws/2047/) or [GitHub Pages](https:
 - Local saves, undo/redo, best scores, seeded challenges, and portable saved-game links.
 - Accessible DOM, documented JavaScript API, WebMCP tools, and URL configuration.
 - Responsive layouts, light/dark themes, reduced motion, and adjustable sound effects.
+- Optional timed assessments, preserved deadlines, visible end results, and lightweight milestone confetti.
 
 The engine matches the iOS binary merge rules. Classic and Insane spawn 1; 2048 spawns 2. Each tile merges at most once per move. Only a move that changes the board spawns a tile.
 
@@ -24,6 +25,16 @@ Version 1 used seeds for all sessions, including automatically chosen ones. Save
 
 The hash is checked against Node’s SHA-256 and fixed vectors. Algorithm references: [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final) and [Web Crypto](https://www.w3.org/TR/webcrypto/#Crypto-method-getRandomValues).
 
+## Timed assessments
+
+The timer is off by default, with a 120-second editing preset. `?timer=120` or `game.newGame({timeLimit:120})` starts a timed round immediately. Clock checks use monotonic elapsed time alongside wall time; absolute deadlines survive reloads and shared round links. Every move, undo, and redo checks expiry. A move that crosses the deadline during calculation is not committed. The clock continues in menus and background tabs.
+
+The UI retains Score, Best, and Moves. A timer near the title opens settings; results use a floating panel placed in space outside the board. Full mode badges open the new-game dialog. Starting a new game with a nonzero score requires confirmation. The synchronous API returns `needsConfirmation` and leaves the session intact unless `confirm:true` is provided or the dialog is confirmed.
+
+Assessment results include the peak tile (not rewound by undo), final score, score gain, action counts, mode, seed, size, duration, and deadline. Timed snapshots use `#round=`; older `#state=` and stored games remain compatible and untimed.
+
+All modes celebrate their first tile >=2047. The celebration uses 32 compositor-animated elements with no frame loop or pointer interception, cleans up after 1.9 seconds, and respects reduced motion. Its per-round flag persists across saves and undo/redo.
+
 ## Run and test
 
 Serve `site/` with any static HTTP server. No build step or package installation is required. Node.js 22 or later runs the tests:
@@ -33,6 +44,8 @@ npm test
 ```
 
 To measure browser performance, serve the project root and open `tests/performance.html`. The benchmark measures synchronous move handling and the next animation frame, with local saves both on and off.
+
+`tests/browser.html` checks save migration and randomness. `tests/assessment-browser.html` checks timer expiry, frozen results, confirmation, and celebrations in a real browser. `tests/layout-compare.html` compares against a previous static copy served at `baseline/`; it verifies board size and nonoverlapping result panels across phone, tablet, and desktop viewports. Test fixtures and captures are not published.
 
 Only `site/` is deployed. GitHub Actions validates the engine before publishing GitHub Pages on pushes to `main`. Assets use relative URLs and work under `/2047/` on both hosts. The shared domain receives the same static files under its `2047/` directory.
 
